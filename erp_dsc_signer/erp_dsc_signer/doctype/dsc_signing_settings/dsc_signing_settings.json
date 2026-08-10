@@ -1,0 +1,337 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-08-10 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "section_methods",
+  "enable_pfx_signing",
+  "enable_usb_signing",
+  "column_break_methods",
+  "default_signing_method",
+  "section_pfx",
+  "pfx_file",
+  "pfx_password",
+  "validate_now",
+  "column_break_certificate",
+  "certificate_validation_status",
+  "certificate_validation_message",
+  "certificate_subject",
+  "certificate_valid_till",
+  "section_usb",
+  "usb_signer_url",
+  "usb_session_expiry_minutes",
+  "section_identity",
+  "certificate_location",
+  "contact_email",
+  "section_print",
+  "default_print_format",
+  "letter_head",
+  "section_trust",
+  "enable_timestamp",
+  "timestamp_url",
+  "test_tsa",
+  "section_appearance",
+  "signer_name",
+  "signature_image",
+  "section_signature_box",
+  "signature_page",
+  "signing_reason",
+  "column_break_signature",
+  "signature_box_x1",
+  "signature_box_y1",
+  "signature_box_x2",
+  "signature_box_y2",
+  "section_help",
+  "signature_box_help"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "section_methods",
+   "fieldtype": "Section Break",
+   "label": "Signing Methods"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_pfx_signing",
+   "fieldtype": "Check",
+   "label": "Enable PFX Signing"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_usb_signing",
+   "fieldtype": "Check",
+   "label": "Enable USB DSC Signing"
+  },
+  {
+   "fieldname": "column_break_methods",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "pfx",
+   "description": "pfx signs on the server; usb signs with a token attached to the user's computer.",
+   "fieldname": "default_signing_method",
+   "fieldtype": "Select",
+   "label": "Default Signing Method",
+   "options": "pfx\nusb",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "fieldname": "section_pfx",
+   "fieldtype": "Section Break",
+   "label": "PFX Certificate"
+  },
+  {
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "description": "Upload a private .pfx or .p12 file.",
+   "fieldname": "pfx_file",
+   "fieldtype": "Attach",
+   "label": "PFX Certificate File",
+   "options": "Private"
+  },
+  {
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "description": "Leave blank if the PFX was exported without a password.",
+   "fieldname": "pfx_password",
+   "fieldtype": "Password",
+   "label": "PFX Password"
+  },
+  {
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "description": "Validate the certificate and password without signing a document.",
+   "fieldname": "validate_now",
+   "fieldtype": "Button",
+   "label": "Validate"
+  },
+  {
+   "fieldname": "column_break_certificate",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Not Validated",
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "fieldname": "certificate_validation_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Validation Status",
+   "options": "Not Validated\nValid\nInvalid",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "fieldname": "certificate_validation_message",
+   "fieldtype": "Small Text",
+   "label": "Validation Message",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "fieldname": "certificate_subject",
+   "fieldtype": "Data",
+   "label": "Certificate Subject",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.enable_pfx_signing",
+   "fieldname": "certificate_valid_till",
+   "fieldtype": "Date",
+   "label": "Certificate Valid Till",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.enable_usb_signing",
+   "fieldname": "section_usb",
+   "fieldtype": "Section Break",
+   "label": "USB DSC Local Signer"
+  },
+  {
+   "default": "http://127.0.0.1:17777",
+   "depends_on": "eval:doc.enable_usb_signing",
+   "description": "Loopback URL of the ERP DSC Signer desktop application. Only localhost addresses are accepted.",
+   "fieldname": "usb_signer_url",
+   "fieldtype": "Data",
+   "label": "Local Signer URL"
+  },
+  {
+   "default": "5",
+   "depends_on": "eval:doc.enable_usb_signing",
+   "description": "Single-use server signing session lifetime (1-15 minutes).",
+   "fieldname": "usb_session_expiry_minutes",
+   "fieldtype": "Int",
+   "label": "USB Session Expiry (minutes)"
+  },
+  {
+   "fieldname": "section_identity",
+   "fieldtype": "Section Break",
+   "label": "Signing Identity"
+  },
+  {
+   "default": "Gurugram, Haryana, India",
+   "fieldname": "certificate_location",
+   "fieldtype": "Data",
+   "label": "Signing Location"
+  },
+  {
+   "fieldname": "contact_email",
+   "fieldtype": "Data",
+   "label": "Contact Email",
+   "options": "Email"
+  },
+  {
+   "fieldname": "section_print",
+   "fieldtype": "Section Break",
+   "label": "Print"
+  },
+  {
+   "fieldname": "default_print_format",
+   "fieldtype": "Link",
+   "label": "Default Print Format",
+   "options": "Print Format"
+  },
+  {
+   "description": "Optional letter head passed to PDF generation.",
+   "fieldname": "letter_head",
+   "fieldtype": "Link",
+   "label": "Letter Head",
+   "options": "Letter Head"
+  },
+  {
+   "fieldname": "section_trust",
+   "fieldtype": "Section Break",
+   "label": "Trust & Timestamp"
+  },
+  {
+   "default": "1",
+   "description": "Embed an RFC 3161 timestamp token from a trusted TSA.",
+   "fieldname": "enable_timestamp",
+   "fieldtype": "Check",
+   "label": "Embed Trusted Timestamp (TSA)"
+  },
+  {
+   "default": "https://timestamp.digicert.com",
+   "depends_on": "eval:doc.enable_timestamp",
+   "fieldname": "timestamp_url",
+   "fieldtype": "Data",
+   "label": "TSA URL"
+  },
+  {
+   "depends_on": "eval:doc.enable_timestamp",
+   "description": "Send an RFC 3161 probe from the Frappe server.",
+   "fieldname": "test_tsa",
+   "fieldtype": "Button",
+   "label": "Test TSA Connectivity"
+  },
+  {
+   "fieldname": "section_appearance",
+   "fieldtype": "Section Break",
+   "label": "Signature Appearance"
+  },
+  {
+   "description": "Display name shown on the signed PDF; certificate CN is used when blank.",
+   "fieldname": "signer_name",
+   "fieldtype": "Data",
+   "label": "Signer Display Name"
+  },
+  {
+   "description": "Optional handwritten signature image (transparent PNG recommended).",
+   "fieldname": "signature_image",
+   "fieldtype": "Attach Image",
+   "label": "Signature Image"
+  },
+  {
+   "fieldname": "section_signature_box",
+   "fieldtype": "Section Break",
+   "label": "Visible Signature Box (PDF points)"
+  },
+  {
+   "default": "Last Page",
+   "fieldname": "signature_page",
+   "fieldtype": "Select",
+   "label": "Signature Page",
+   "options": "First Page\nLast Page"
+  },
+  {
+   "default": "Digitally signed invoice",
+   "fieldname": "signing_reason",
+   "fieldtype": "Data",
+   "label": "Signing Reason"
+  },
+  {
+   "fieldname": "column_break_signature",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "340",
+   "fieldname": "signature_box_x1",
+   "fieldtype": "Int",
+   "label": "Box X1"
+  },
+  {
+   "default": "45",
+   "fieldname": "signature_box_y1",
+   "fieldtype": "Int",
+   "label": "Box Y1"
+  },
+  {
+   "default": "555",
+   "fieldname": "signature_box_x2",
+   "fieldtype": "Int",
+   "label": "Box X2"
+  },
+  {
+   "default": "130",
+   "fieldname": "signature_box_y2",
+   "fieldtype": "Int",
+   "label": "Box Y2"
+  },
+  {
+   "fieldname": "section_help",
+   "fieldtype": "Section Break",
+   "label": "Help"
+  },
+  {
+   "fieldname": "signature_box_help",
+   "fieldtype": "HTML",
+   "label": "Signature Box Help",
+   "options": "<p>Coordinates are PDF points measured from the bottom-left corner (A4 = 595 x 842).</p><p>USB token PINs are requested only by the local signer application and are never sent to ERPNext.</p>"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-10 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ERP DSC Signer",
+ "name": "DSC Signing Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

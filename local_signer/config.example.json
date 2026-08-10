@@ -1,0 +1,17 @@
+{
+  "host": "127.0.0.1",
+  "port": 17777,
+  "allowed_origins": ["https://erp.example.com"],
+  "limits": {"max_request_bytes": 20971520, "max_pdf_bytes": 14680064},
+  "nonce": {"ttl_seconds": 180, "max_count": 512},
+  "timestamp": {
+    "allowed_urls": ["https://timestamp.digicert.com"],
+    "retry_without_timestamp": true
+  },
+  "providers": {
+    "custom_modules": [],
+    "additional_paths": {
+      "generic_pkcs11": ["/absolute/path/to/vendor-pkcs11-library"]
+    }
+  }
+}

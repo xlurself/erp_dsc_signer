@@ -27,7 +27,9 @@ app_license = "MIT"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {
+	"Sales Invoice": "public/js/sales_invoice.js",
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -61,8 +63,7 @@ app_license = "MIT"
 # Installation
 # ------------
 
-# before_install = "erp_dsc_signer.install.before_install"
-# after_install = "erp_dsc_signer.install.after_install"
+before_install = "erp_dsc_signer.install.before_install"
 
 # Uninstallation
 # ------------
@@ -213,3 +214,24 @@ app_license = "MIT"
 # auth_hooks = [
 # 	"erp_dsc_signer.auth.validate"
 # ]
+
+# Sales Invoice signing status fields. Keep the names compatible with the
+# original ERP PDF Signer app so existing sites can migrate without data loss.
+fixtures = [
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Sales Invoice-custom_digital_signature_section",
+					"Sales Invoice-custom_digitally_signed",
+					"Sales Invoice-custom_signed_invoice_pdf",
+					"Sales Invoice-custom_signed_on",
+					"Sales Invoice-custom_signed_by",
+				],
+			]
+		],
+	}
+]

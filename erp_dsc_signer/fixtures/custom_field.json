@@ -1,0 +1,68 @@
+[
+ {
+  "allow_on_submit": 1,
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "custom_digital_signature_section",
+  "fieldtype": "Section Break",
+  "insert_after": "terms",
+  "label": "Digital Signature",
+  "module": "ERP DSC Signer",
+  "name": "Sales Invoice-custom_digital_signature_section",
+  "no_copy": 1
+ },
+ {
+  "allow_on_submit": 1,
+  "default": "0",
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "custom_digitally_signed",
+  "fieldtype": "Check",
+  "insert_after": "custom_digital_signature_section",
+  "label": "Digitally Signed",
+  "module": "ERP DSC Signer",
+  "name": "Sales Invoice-custom_digitally_signed",
+  "no_copy": 1,
+  "read_only": 1
+ },
+ {
+  "allow_on_submit": 1,
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "custom_signed_invoice_pdf",
+  "fieldtype": "Attach",
+  "insert_after": "custom_digitally_signed",
+  "label": "Signed Invoice PDF",
+  "module": "ERP DSC Signer",
+  "name": "Sales Invoice-custom_signed_invoice_pdf",
+  "no_copy": 1,
+  "read_only": 1
+ },
+ {
+  "allow_on_submit": 1,
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "custom_signed_on",
+  "fieldtype": "Datetime",
+  "insert_after": "custom_signed_invoice_pdf",
+  "label": "Signed On",
+  "module": "ERP DSC Signer",
+  "name": "Sales Invoice-custom_signed_on",
+  "no_copy": 1,
+  "read_only": 1
+ },
+ {
+  "allow_on_submit": 1,
+  "doctype": "Custom Field",
+  "dt": "Sales Invoice",
+  "fieldname": "custom_signed_by",
+  "fieldtype": "Link",
+  "insert_after": "custom_signed_on",
+  "label": "Signed By",
+  "module": "ERP DSC Signer",
+  "name": "Sales Invoice-custom_signed_by",
+  "no_copy": 1,
+  "options": "User",
+  "read_only": 1
+ }
+]
