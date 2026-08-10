@@ -1,0 +1,20 @@
+[project]
+name = "erp_dsc_signer"
+authors = [
+    { name = "XLURSELF", email = "info@xlurself.com"}
+]
+description = "Digital signing for ERPNext documents using PFX certificates or USB DSC tokens"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    # "frappe~=15.0.0" # Installed and managed by bench.
+]
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+# These dependencies are only installed when developer mode is enabled
+[tool.bench.dev-dependencies]
+# package_name = "~=1.1.0"
