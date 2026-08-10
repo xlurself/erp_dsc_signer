@@ -12,7 +12,10 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from endesive.pdf import cms
 from frappe import _
 from frappe.utils.file_manager import get_file_path
-from PyPDF2 import PdfReader
+try:
+	from pypdf import PdfReader
+except ImportError:  # Frappe v14 benches commonly still provide PyPDF2.
+	from PyPDF2 import PdfReader
 
 
 PFX_METHOD = "pfx"

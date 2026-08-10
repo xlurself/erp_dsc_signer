@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 - 2026-08-10
+
+- Use the maintained `pypdf` reader for Frappe v15 compatibility.
+
 ## 0.1.0 - 2026-08-10
 
 - Add selectable server-side PFX and workstation USB DSC signing modes.
