@@ -113,6 +113,21 @@ class PairInProgress(LocalSignerError):
 		)
 
 
+class PromptTimedOut(LocalSignerError):
+	"""A desktop dialog outlived its hard timeout and is still on screen.
+
+	Reported instead of a generic 500 so the caller can say something true, and so a
+	wedged dialog is distinguishable from a crash.
+	"""
+
+	def __init__(self):
+		super().__init__(
+			"PROMPT_TIMED_OUT",
+			"A dialog on this computer is still waiting for an answer. Finish or close it, then retry.",
+			status=504,
+		)
+
+
 class PairRateLimited(LocalSignerError):
 	def __init__(self, message: str = "Too many pairing attempts. Try again later."):
 		super().__init__("PAIR_RATE_LIMITED", message, status=429)

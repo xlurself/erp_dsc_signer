@@ -5,6 +5,14 @@ keyboard is persisted here instead.  Every origin is canonicalised on the way in
 the way out, so a value written by one release still matches a browser header read by
 the next.
 
+Two processes touch this file: the running signer and the `erp-dsc-local --allow/--revoke`
+CLI.  Neither can see the other's memory, so:
+
+  * reads re-read the file whenever it has changed on disk, which is what makes a CLI
+    revoke take effect against a running daemon instead of waiting for a restart;
+  * writes take a cross-process lock and re-read before applying, so a daemon holding
+    stale state cannot resurrect an origin the CLI just revoked.
+
 Failure policy is closed: an unreadable, corrupt, or unknown-version file yields an
 empty allow set and is left on disk untouched for an operator to inspect.
 """
@@ -16,6 +24,7 @@ import logging
 import os
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 
@@ -40,14 +49,47 @@ def default_store_path() -> Path:
 	return Path(DEFAULT_STATE_DIR).expanduser() / STORE_FILENAME
 
 
+@contextmanager
+def _file_lock(path: Path):
+	"""Best-effort cross-process exclusive lock on a sidecar file."""
+	lock_path = path.with_name(path.name + ".lock")
+	lock_path.parent.mkdir(parents=True, exist_ok=True)
+	handle = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+	locked = False
+	try:
+		try:
+			import fcntl
+
+			fcntl.flock(handle, fcntl.LOCK_EX)
+			locked = True
+		except ImportError:
+			try:
+				import msvcrt
+
+				msvcrt.locking(handle, msvcrt.LK_LOCK, 1)
+				locked = True
+			except Exception:
+				# No advisory locking available.  Writes are still atomic; only the
+				# read-modify-write window is unprotected.
+				logger.warning("Advisory file locking unavailable; concurrent writes may race.")
+		yield
+	finally:
+		if locked:
+			try:
+				import fcntl
+
+				fcntl.flock(handle, fcntl.LOCK_UN)
+			except ImportError:
+				try:
+					import msvcrt
+
+					msvcrt.locking(handle, msvcrt.LK_UNLCK, 1)
+				except Exception:
+					pass
+		os.close(handle)
+
+
 class TrustStore:
-	"""Persisted runtime allow-list plus short-lived denials.
-
-	Reads are served from memory; every mutation rewrites the file atomically while
-	holding the lock, so the service threads and the CLI cannot interleave a
-	read-modify-write.
-	"""
-
 	def __init__(
 		self,
 		path: Path | str | None = None,
@@ -63,6 +105,7 @@ class TrustStore:
 		self._lock = RLock()
 		self._origins: dict[str, dict] = {}
 		self._denials: dict[str, float] = {}
+		self._fingerprint = None
 		self._load()
 
 	# ---------------------------------------------------------------- queries
@@ -72,10 +115,12 @@ class TrustStore:
 		if canonical is None:
 			return False
 		with self._lock:
+			self._reload_if_changed()
 			return canonical in self._origins
 
 	def list_origins(self) -> list[dict]:
 		with self._lock:
+			self._reload_if_changed()
 			return [dict(entry) for entry in self._origins.values()]
 
 	def is_denied(self, origin: str) -> bool:
@@ -83,6 +128,7 @@ class TrustStore:
 		if canonical is None:
 			return False
 		with self._lock:
+			self._reload_if_changed()
 			self._prune_denials()
 			return canonical in self._denials
 
@@ -90,7 +136,8 @@ class TrustStore:
 
 	def allow(self, origin: str, *, site_name: str | None = None, user: str | None = None) -> str:
 		canonical = canonical_origin(origin)
-		with self._lock:
+		with self._lock, _file_lock(self.path):
+			self._load(force=True)  # never write back over another process's changes
 			if canonical not in self._origins and len(self._origins) >= self.max_origins:
 				raise ValueError(
 					f"The local signer already trusts {self.max_origins} origins. "
@@ -112,7 +159,8 @@ class TrustStore:
 		canonical = try_canonical_origin(origin)
 		if canonical is None:
 			return False
-		with self._lock:
+		with self._lock, _file_lock(self.path):
+			self._load(force=True)
 			if canonical not in self._origins:
 				return False
 			del self._origins[canonical]
@@ -123,7 +171,8 @@ class TrustStore:
 		canonical = try_canonical_origin(origin)
 		if canonical is None:
 			return
-		with self._lock:
+		with self._lock, _file_lock(self.path):
+			self._load(force=True)
 			self._denials[canonical] = self._clock() + self.denial_ttl_seconds
 			self._prune_denials()
 			self._save()
@@ -136,7 +185,25 @@ class TrustStore:
 			if expires_at <= now:
 				del self._denials[origin]
 
-	def _load(self) -> None:
+	def _fingerprint_now(self):
+		"""Identity of the file as last written, for cheap change detection."""
+		try:
+			info = self.path.stat()
+		except OSError:
+			return None
+		return (info.st_mtime_ns, info.st_size, info.st_ino)
+
+	def _reload_if_changed(self) -> None:
+		if self._fingerprint_now() != self._fingerprint:
+			self._load(force=True)
+
+	def _load(self, *, force: bool = False) -> None:
+		if not force and self._fingerprint_now() == self._fingerprint:
+			return
+		self._origins = {}
+		self._denials = {}
+		self._fingerprint = self._fingerprint_now()
+
 		path = self.path
 		try:
 			if path.is_symlink():
@@ -217,3 +284,4 @@ class TrustStore:
 			except OSError:
 				pass
 			raise
+		self._fingerprint = self._fingerprint_now()

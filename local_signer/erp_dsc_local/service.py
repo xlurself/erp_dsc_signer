@@ -27,6 +27,7 @@ from .errors import (
 	PairDenied,
 	PairInProgress,
 	PairPromptUnavailable,
+	PromptTimedOut,
 )
 from .nonces import NonceStore
 from .origins import try_canonical_origin
@@ -35,7 +36,7 @@ from .pin import request_pin
 from .providers import ProviderRegistry
 from .token import TokenClient
 from .trust import TrustStore
-from .ui import DialogHost, UiBusy, UiUnavailable
+from .ui import DialogHost, UiBusy, UiTimedOut, UiUnavailable
 
 
 VERSION = "0.2.0"
@@ -83,6 +84,8 @@ class SignerService:
 			allowed = self.dialogs.run_exclusive(lambda: self.consent(canonical_origin, claims))
 		except UiBusy as exc:
 			raise PairInProgress() from exc
+		except UiTimedOut as exc:
+			raise PromptTimedOut() from exc
 		except UiUnavailable as exc:
 			raise PairPromptUnavailable() from exc
 
@@ -108,6 +111,8 @@ class SignerService:
 			)
 		except UiBusy as exc:
 			raise PairInProgress() from exc
+		except UiTimedOut as exc:
+			raise PromptTimedOut() from exc
 		except UiUnavailable as exc:
 			raise PairPromptUnavailable() from exc
 
