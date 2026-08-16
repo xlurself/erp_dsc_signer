@@ -34,7 +34,29 @@ cp config.example.json config.json
 erp-dsc-local --config config.json
 ```
 
-Set the exact ERP origin in `allowed_origins`. The service binds only to loopback. Supported provider profiles include ePass, SafeNet, ProxKey, WatchData, and a configured generic PKCS#11 module. The token vendor's current middleware is still required, and Apple Silicon needs a compatible native or Rosetta driver.
+The service binds only to loopback. Supported provider profiles include ePass, SafeNet, ProxKey, WatchData, and a configured generic PKCS#11 module. The token vendor's current middleware is still required, and Apple Silicon needs a compatible native or Rosetta driver.
+
+### Pairing a site
+
+`allowed_origins` can be left empty. The first time you sign from a given ERP site, the
+signer asks on the desktop whether to allow it and remembers the answer in
+`~/.erp-dsc-local/allowed_origins.json`. Nothing needs to be edited by hand, which
+matters when the same build is installed on workstations nobody can pre-configure.
+
+The dialog shows the site's address exactly as the browser sent it. Allow it only when
+it matches the address in your browser's own address bar.
+
+Manage trusted sites without a desktop session — useful over SSH, and the fallback when
+the workstation has no route back to the site:
+
+```bash
+erp-dsc-local --list-origins
+erp-dsc-local --allow https://erp.example.com
+erp-dsc-local --revoke https://erp.example.com
+```
+
+Origins listed in `config.json` are owned by whoever manages the workstation: they need
+no pairing and `--revoke` will not remove them. Use that to pre-approve a fleet.
 
 ## Verification
 

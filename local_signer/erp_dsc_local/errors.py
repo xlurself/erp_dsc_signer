@@ -63,3 +63,57 @@ class PinCancelled(LocalSignerError):
 	def __init__(self):
 		super().__init__("PIN_CANCELLED", "Signing was cancelled in the local PIN dialog.", status=409)
 
+
+class InvalidOrigin(LocalSignerError):
+	def __init__(self):
+		super().__init__("INVALID_ORIGIN", "The request Origin header is missing or malformed.", status=400)
+
+
+class OriginNotPaired(LocalSignerError):
+	"""The origin is well-formed but has not been paired with this workstation.
+
+	Distinct from a hard denial: the browser client turns this into a "pair this
+	workstation" prompt rather than "the signer is not running".
+	"""
+
+	def __init__(self):
+		super().__init__(
+			"ORIGIN_NOT_PAIRED",
+			"This ERP site is not paired with the local signer on this computer.",
+			status=403,
+		)
+
+
+class PairProofInvalid(LocalSignerError):
+	def __init__(self, message: str = "The pairing proof could not be verified with the ERP site."):
+		super().__init__("PAIR_PROOF_INVALID", message, status=403)
+
+
+class PairDenied(LocalSignerError):
+	def __init__(self):
+		super().__init__("PAIR_DENIED", "Pairing was declined on this computer.", status=403)
+
+
+class PairPromptUnavailable(LocalSignerError):
+	def __init__(self):
+		super().__init__(
+			"PAIR_PROMPT_UNAVAILABLE",
+			"The pairing dialog is unavailable. Run the signer in an interactive desktop session, "
+			"or pair from the command line with: erp-dsc-local --allow <origin>",
+			status=503,
+		)
+
+
+class PairInProgress(LocalSignerError):
+	def __init__(self):
+		super().__init__(
+			"PAIR_IN_PROGRESS",
+			"Another pairing request is already waiting for an answer on this computer.",
+			status=429,
+		)
+
+
+class PairRateLimited(LocalSignerError):
+	def __init__(self, message: str = "Too many pairing attempts. Try again later."):
+		super().__init__("PAIR_RATE_LIMITED", message, status=429)
+

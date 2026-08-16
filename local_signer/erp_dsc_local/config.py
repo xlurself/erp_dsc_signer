@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .errors import ConfigurationError
+from .origins import canonical_origin
 
 
 PROVIDER_IDS = ("epass", "safenet", "proxkey", "watchdata", "generic_pkcs11")
@@ -55,9 +56,10 @@ def load_config(path: str | Path) -> SignerConfig:
 	origins_raw = raw.get("allowed_origins", [])
 	if not isinstance(origins_raw, list):
 		raise ConfigurationError("allowed_origins must be a list of exact ERP origins.")
+	# May be empty: a fresh workstation install pairs at runtime instead of being
+	# pre-configured.  Entries listed here remain operator-owned and cannot be revoked
+	# from the runtime store.
 	allowed_origins = frozenset(_validate_origin(value) for value in origins_raw)
-	if not allowed_origins:
-		raise ConfigurationError("At least one exact ERP origin is required in allowed_origins.")
 
 	limits = _mapping(raw.get("limits", {}), "limits")
 	max_request = _bounded_int(
@@ -114,23 +116,13 @@ def _loopback_host(value: object) -> str:
 
 
 def _validate_origin(value: object) -> str:
-	if not isinstance(value, str):
-		raise ConfigurationError("Every allowed origin must be a string.")
-	parsed = urlsplit(value)
-	if (
-		parsed.scheme not in {"http", "https"}
-		or not parsed.hostname
-		or parsed.username
-		or parsed.password
-		or parsed.path not in {"", "/"}
-		or parsed.query
-		or parsed.fragment
-	):
-		raise ConfigurationError(f"Invalid ERP origin: {value!r}")
-	canonical = f"{parsed.scheme}://{parsed.hostname.lower()}"
-	if parsed.port is not None:
-		canonical += f":{parsed.port}"
-	return canonical
+	# Delegates to the shared canonicaliser so a configured origin, a persisted origin
+	# and a browser Origin header all reduce to the same string.  Note this strips the
+	# scheme's default port, which an older config may have written explicitly.
+	try:
+		return canonical_origin(value)
+	except ValueError as exc:
+		raise ConfigurationError(f"Invalid ERP origin: {value!r}") from exc
 
 
 def _validate_https_url(value: object) -> str:

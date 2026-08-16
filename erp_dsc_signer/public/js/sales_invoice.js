@@ -29,7 +29,7 @@ function choose_signing_method(frm, replace) {
 				fields: [
 					{fieldname: "method", label: __("Signing Method"), fieldtype: "Select", options: options.methods.map((item) => item.id).join("\n"), default: options.default_method},
 					{fieldname: "provider", label: __("USB Token Provider"), fieldtype: "Select", options: options.providers.map((item) => item.id).join("\n"), default: "auto", depends_on: "eval:doc.method === 'usb'"},
-					{fieldname: "help", fieldtype: "HTML", options: `<p class="text-muted">${__("For USB signing, connect the token and start the local ERP DSC Signer. Its PIN dialog appears only on this computer.")}</p>`},
+					{fieldname: "help", fieldtype: "HTML", options: `<p class="text-muted">${__("For USB signing, connect the token and start the local ERP DSC Signer. The first time you sign from this site, it will ask you on the desktop to allow it. Its PIN dialog only ever appears on this computer.")}</p>`},
 				],
 				primary_action_label: __("Continue"),
 				primary_action(values) {
@@ -55,7 +55,9 @@ function sign_with_pfx(frm, replace) {
 
 async function sign_with_usb(frm, replace, provider, base_url) {
 	try {
-		await local_request(base_url, "/v1/health", "GET");
+		// Pair before anything server-side happens, so a workstation that is not yet
+		// trusted never leaves a half-built signing session behind.
+		await ensure_paired(base_url);
 		const prepared = await frappe_request("erp_dsc_signer.api.signing.prepare_usb_signing", {name: frm.doc.name, replace, provider});
 		const certificate = await select_local_certificate(base_url, provider);
 		const sign_nonce = await local_request(base_url, "/v1/nonce", "POST", {purpose: "sign"});
@@ -104,14 +106,72 @@ async function frappe_request(method, args) {
 	return new Promise((resolve, reject) => frappe.call({method, args, callback: (r) => resolve(r.message), error: (r) => reject(new Error(r._server_messages ? JSON.parse(r._server_messages)[0] : __("ERPNext rejected the request.")))}));
 }
 
+class LocalSignerError extends Error {
+	constructor(message, code) {
+		super(message);
+		this.code = code;
+	}
+}
+
 async function local_request(base_url, path, method, body) {
+	const options = {method};
+	if (body !== undefined) {
+		options.body = JSON.stringify(body);
+		// Set only when a body exists. A Content-Type on a GET makes it a non-simple
+		// request, forcing a CORS preflight that an unpaired origin cannot complete —
+		// which is how "not paired" used to masquerade as "not reachable".
+		options.headers = {"Content-Type": "application/json"};
+	}
 	let response;
 	try {
-		response = await fetch(`${base_url.replace(/\/$/, "")}${path}`, {method, headers: {"Content-Type": "application/json"}, body: body ? JSON.stringify(body) : undefined});
+		response = await fetch(`${base_url.replace(/\/$/, "")}${path}`, options);
 	} catch (_error) {
-		throw new Error(__("The local ERP DSC Signer is not reachable. Start it and check its allowed ERP origin."));
+		// A rejected fetch means no HTTP response at all: nothing is listening.
+		throw new LocalSignerError(
+			__("The local ERP DSC Signer is not running on this computer. Start it and try again."),
+			"SIGNER_OFFLINE"
+		);
 	}
 	const payload = await response.json().catch(() => ({}));
-	if (!response.ok || !payload.ok) throw new Error((payload.error && payload.error.message) || __("The local signer rejected the request."));
+	if (!response.ok || !payload.ok) {
+		const error = (payload && payload.error) || {};
+		throw new LocalSignerError(error.message || __("The local signer rejected the request."), error.code);
+	}
 	return payload;
+}
+
+function confirm_pairing() {
+	return new Promise((resolve) => {
+		frappe.confirm(
+			__("This computer has not been paired with this ERP site yet.") +
+				`<br><br><b>${frappe.utils.escape_html(window.location.origin)}</b><br><br>` +
+				__("A dialog will appear on your desktop asking you to allow it. Check that the address shown there matches the one above before you allow it."),
+			() => resolve(true),
+			() => resolve(false)
+		);
+	});
+}
+
+async function ensure_paired(base_url) {
+	const health = await local_request(base_url, "/v1/health", "GET");
+	if (health.paired) return;
+
+	if (!(await confirm_pairing())) {
+		throw new LocalSignerError(__("Pairing was cancelled."), "PAIR_CANCELLED");
+	}
+
+	const issued = await frappe_request("erp_dsc_signer.api.pairing.issue_pairing_token", {});
+	// The token is bound to the origin this site derived from the request. If that is
+	// not the address in the browser, pairing the workstation would trust the wrong
+	// name — stop rather than silently pair something the user cannot verify.
+	if (!issued || issued.origin !== window.location.origin) {
+		throw new LocalSignerError(
+			__("This site reported its address as {0} but your browser is on {1}. Pairing was stopped.", [
+				(issued && issued.origin) || "?",
+				window.location.origin,
+			]),
+			"ORIGIN_MISMATCH"
+		);
+	}
+	await local_request(base_url, "/v1/pair", "POST", {pairing_token: issued.token});
 }
