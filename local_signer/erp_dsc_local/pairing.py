@@ -136,8 +136,9 @@ def verify_pairing_proof(origin: str, token: str, *, opener=None) -> SiteClaims:
 		raise
 	except (urllib.error.URLError, urllib.error.HTTPError, OSError, ssl.SSLError) as exc:
 		raise PairProofInvalid(
-			"The ERP site could not be reached to confirm pairing. "
-			"If this workstation has no route to the site, pair from the command line instead."
+			"The ERP site could not be reached to confirm pairing. If this workstation has no "
+			"route back to the site, pair from the command line instead: "
+			"erp-dsc-local --allow <origin>"
 		) from exc
 	except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
 		raise PairProofInvalid() from exc

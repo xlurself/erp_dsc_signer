@@ -90,10 +90,14 @@ class TestVerifyPairingProof(unittest.TestCase):
 			verify_pairing_proof("https://a.example", "t" * 32, opener=opener)
 
 	def test_unreachable_site_is_rejected_with_cli_hint(self):
+		# Assert against the message itself. An earlier version of this test appended
+		# the needle to the haystack, so it could not fail — worse than no test.
 		opener = _Opener(error=OSError("connection refused"))
 		with self.assertRaises(PairProofInvalid) as ctx:
 			verify_pairing_proof("https://a.example", "t" * 32, opener=opener)
-		self.assertIn("--allow", ctx.exception.message.lower() + " --allow")
+		message = ctx.exception.message
+		self.assertIn("--allow", message)
+		self.assertIn("could not be reached", message)
 
 	def test_malformed_token_never_reaches_the_network(self):
 		opener = _Opener(_ok("https://a.example"))
