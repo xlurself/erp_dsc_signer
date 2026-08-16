@@ -5,3 +5,14 @@
 tags
 erp_dsc_signer/docs/current
 node_modules/
+# OM AI Reviewer — do not commit (runtime files + token-bearing config)
+.omai-review.json
+.omai-review/REVIEW_PROMPT.md
+.omai-review/REVIEW_*.md
+.omai-review/REVIEW_CONTEXT.md
+.omai-review/REVIEW_CONTEXT.md.building.*
+.omai-review/_omai_post_*.json
+.omai-review/_session_*.json
+.omai-review/status.json
+.omai-review/logs/
+graphify-out/
