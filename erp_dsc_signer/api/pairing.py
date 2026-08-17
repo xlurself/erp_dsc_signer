@@ -60,15 +60,24 @@ def _request_origin() -> str:
 	actually used, and binding the token to the wrong one reproduces exactly the
 	"paired site looks unpaired" failure this feature exists to remove.
 
-	Also deliberately NOT the request's Origin header, which is client-supplied: a
-	cross-origin caller must never be able to mint a token naming its own origin.
+	Also deliberately NOT the request's Origin header, and NOT X-Forwarded-Host: both
+	are client-supplied, and a caller must never be able to mint a token naming an
+	origin of its choosing. The Host header is used instead because Frappe itself
+	routes requests to a site with it (frappe/app.py: get_site_name(request.host)), so
+	on any correctly-served deployment -- Frappe Cloud included -- it is already the
+	address the browser used, and a wrong value would not have reached this site.
+
+	X-Forwarded-Proto is still consulted for the SCHEME only: a TLS-terminating proxy
+	leaves request.scheme as http, and it cannot be upgraded any other way. A forged
+	value can only downgrade the origin to http, which the browser-side check against
+	window.location.origin then rejects.
 	"""
 	request = getattr(frappe.local, "request", None)
 	if request is None:
 		frappe.throw(_("Pairing tokens can only be issued from a web request."))
-	scheme = request.headers.get("X-Forwarded-Proto") or request.scheme
-	host = request.headers.get("X-Forwarded-Host") or request.host
-	return _canonical_origin(scheme, host)
+	forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+	scheme = "https" if request.scheme == "https" or forwarded_proto == "https" else (forwarded_proto or request.scheme)
+	return _canonical_origin(scheme, request.host)
 
 
 @frappe.whitelist()
