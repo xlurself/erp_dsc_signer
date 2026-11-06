@@ -3,19 +3,19 @@
 1. `--revoke` runs in a separate process from the daemon. It must change what the
    RUNNING service authorises, and a daemon holding stale state must not write a
    revoked origin back.
-2. DialogHost must hold its mutex for the lifetime of the dialog TASK, not of the
-   call: releasing on hard timeout let the next request queue behind a dialog that
-   was still on screen.
+2. DialogHost's mutex is held for the whole `run_exclusive` call, so a second request
+   is refused rather than queued behind a dialog that is still on screen.  (Spec 001
+   removed the executor and the hard timeout; the dialog child, its deadline and the
+   un-reapable-child case are covered in test_dialog_host.py.)
 """
 
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 
 from erp_dsc_local.trust import TrustStore
-from erp_dsc_local.ui import DialogHost, UiBusy, UiTimedOut
+from erp_dsc_local.ui import DialogHost, UiBusy
 
 
 ERP = "https://site.example"
@@ -84,55 +84,41 @@ class TestRevokeReachesARunningDaemon(unittest.TestCase):
 
 
 class TestDialogHostLifecycle(unittest.TestCase):
-	def test_mutex_is_held_until_the_task_finishes_not_until_the_timeout(self):
-		host = DialogHost(hard_timeout=0.2)
+	def test_mutex_is_held_for_the_whole_call(self):
+		host = DialogHost()
 		release = threading.Event()
 		started = threading.Event()
+		box = {}
 
 		def slow_dialog():
 			started.set()
 			release.wait(5)
 			return "done"
 
-		def call():
-			try:
-				host.run_exclusive(slow_dialog)
-			except UiTimedOut:
-				pass
-
-		first = threading.Thread(target=call)
+		first = threading.Thread(target=lambda: box.setdefault("result", host.run_exclusive(slow_dialog)))
 		first.start()
 		self.assertTrue(started.wait(2))
-		time.sleep(0.5)  # let the hard timeout fire while the dialog is still running
 
-		# The dialog is still on the worker, so a second caller must be REJECTED,
-		# not silently queued behind a prompt that is still on screen.
+		# The first call is still running, so a second caller must be REJECTED, not
+		# silently queued behind a prompt that is still on screen.
+		self.assertTrue(host.busy)
 		with self.assertRaises(UiBusy):
 			host.run_exclusive(lambda: "second")
 
 		release.set()
 		first.join(5)
-
-		# Once the task really finishes the mutex frees again.
-		deadline = time.monotonic() + 5
-		while host.busy and time.monotonic() < deadline:
-			time.sleep(0.01)
+		self.assertEqual("done", box["result"])
 		self.assertFalse(host.busy)
 		self.assertEqual("later", host.run_exclusive(lambda: "later"))
-		host.shutdown()
 
-	def test_timeout_raises_uitimedout_not_a_generic_error(self):
-		host = DialogHost(hard_timeout=0.1)
-		release = threading.Event()
-		try:
-			with self.assertRaises(UiTimedOut):
-				host.run_exclusive(lambda: release.wait(3))
-		finally:
-			release.set()
-			host.shutdown()
+	def test_run_exclusive_is_not_reentrant(self):
+		host = DialogHost()
+		with self.assertRaises(UiBusy):
+			host.run_exclusive(lambda: host.run_exclusive(lambda: "inner"))
+		self.assertFalse(host.busy)
 
 	def test_dialog_exception_releases_the_mutex(self):
-		host = DialogHost(hard_timeout=5)
+		host = DialogHost()
 
 		def boom():
 			raise RuntimeError("dialog failed")

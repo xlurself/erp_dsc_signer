@@ -14,6 +14,13 @@ from .origins import canonical_origin
 
 PROVIDER_IDS = ("epass", "safenet", "proxkey", "watchdata", "generic_pkcs11")
 
+REMOVED_PIN_KEY = "allow_pin_in_request"
+REMOVED_PIN_KEY_MESSAGE = (
+	"development.allow_pin_in_request is no longer supported: the signer never accepts a "
+	"PIN in a request and always asks for it in its own desktop dialog. Remove the key "
+	"from the configuration file."
+)
+
 
 @dataclass(frozen=True)
 class CustomModule:
@@ -33,7 +40,6 @@ class SignerConfig:
 	max_nonce_count: int = 512
 	nonce_ttl_seconds: int = 180
 	allow_originless_health: bool = True
-	allow_development_pin_in_request: bool = False
 	allowed_timestamp_urls: frozenset[str] = frozenset()
 	retry_without_timestamp: bool = True
 	custom_modules: tuple[CustomModule, ...] = field(default_factory=tuple)
@@ -73,6 +79,11 @@ def load_config(path: str | Path) -> SignerConfig:
 
 	nonce = _mapping(raw.get("nonce", {}), "nonce")
 	development = _mapping(raw.get("development", {}), "development")
+	if REMOVED_PIN_KEY in development:
+		# Any value, true or false: a config that still carries the key was written for
+		# a signer that accepted a PIN in the HTTP body, and silently ignoring it would
+		# hide that the deployment assumes behaviour this signer no longer has.
+		raise ConfigurationError(REMOVED_PIN_KEY_MESSAGE)
 	timestamp = _mapping(raw.get("timestamp", {}), "timestamp")
 	tsa_values = timestamp.get("allowed_urls", [])
 	if not isinstance(tsa_values, list):
@@ -89,7 +100,6 @@ def load_config(path: str | Path) -> SignerConfig:
 		max_nonce_count=_bounded_int(nonce.get("max_count", 512), "nonce.max_count", 8, 4096),
 		nonce_ttl_seconds=_bounded_int(nonce.get("ttl_seconds", 180), "nonce.ttl_seconds", 30, 600),
 		allow_originless_health=bool(raw.get("allow_originless_health", True)),
-		allow_development_pin_in_request=bool(development.get("allow_pin_in_request", False)),
 		allowed_timestamp_urls=allowed_tsa,
 		retry_without_timestamp=bool(timestamp.get("retry_without_timestamp", True)),
 		custom_modules=_custom_modules(providers.get("custom_modules", [])),

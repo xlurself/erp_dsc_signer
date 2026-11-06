@@ -1,8 +1,9 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from erp_dsc_local.config import ConfigurationError, load_config
+from erp_dsc_local.config import ConfigurationError, SignerConfig, load_config
 from erp_dsc_local.nonces import NonceStore
 
 
@@ -20,6 +21,34 @@ class TestConfig(unittest.TestCase):
 			path.write_text('{"allowed_origins":["https://erp.example.com"]}', encoding="utf-8")
 			config = load_config(path)
 			self.assertEqual(frozenset({"https://erp.example.com"}), config.allowed_origins)
+
+	def write(self, directory, document):
+		path = Path(directory) / "config.json"
+		path.write_text(json.dumps(document), encoding="utf-8")
+		return path
+
+	def test_dev_pin_key_rejected(self):
+		# Spec 001: the key is refused at load whatever its value; a config written for a
+		# signer that accepted a PIN in the HTTP body must not start silently.
+		for value in (True, False, 1, 0, None, "yes"):
+			with self.subTest(value=value):
+				with tempfile.TemporaryDirectory() as directory:
+					path = self.write(directory, {"development": {"allow_pin_in_request": value}})
+					with self.assertRaises(ConfigurationError) as ctx:
+						load_config(path)
+					self.assertIn("development.allow_pin_in_request", ctx.exception.message)
+					self.assertIn("no longer supported", ctx.exception.message)
+
+	def test_development_section_without_the_key_still_loads(self):
+		with tempfile.TemporaryDirectory() as directory:
+			load_config(self.write(directory, {"development": {}}))
+			load_config(self.write(directory, {}))
+
+	def test_config_no_longer_has_a_body_pin_switch(self):
+		with tempfile.TemporaryDirectory() as directory:
+			config = load_config(self.write(directory, {}))
+		self.assertFalse(hasattr(config, "allow_development_pin_in_request"))
+		self.assertNotIn("allow_development_pin_in_request", SignerConfig.__dataclass_fields__)
 
 
 class TestNonceStore(unittest.TestCase):

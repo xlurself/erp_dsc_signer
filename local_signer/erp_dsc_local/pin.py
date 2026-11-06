@@ -1,66 +1,70 @@
-"""Native, local-only PIN prompt.
+"""Ask for the USB token PIN in the signer's own dialog process (spec 001, §3.3 and §6).
 
-The origin is shown first and unadorned because it is the only string in this dialog
-the requesting site cannot choose.  The document name arrives in the request body, so
-it is attacker-controlled: it is rendered as a clearly-labelled secondary line and
-never as the headline the user is being asked to trust.
+The daemon never creates a window.  It builds a request with SEPARATE fields -- the
+origin (the only text the requesting site cannot choose), the site's claims, and the
+signer's own warnings -- and hands it to the shared DialogHost, which shows it from a
+child process.  The document name arrives in the request body, so it is a site claim
+like any other: the dialog labels it as such, and an over-long or unreadable one is
+replaced by a visible placeholder (never silently truncated).
+
+Only the `entered` reply carries the PIN, and it is returned directly.  Every failure is
+raised outside the `except` that caught it, so no exception this module raises links
+back (via __cause__ or __context__) to anything the dialog machinery saw.
 """
 
 from __future__ import annotations
 
-from .errors import PinCancelled, PinPromptUnavailable
-from .ui import UiUnavailable, new_tk_root
+from . import dialog_child
+from .errors import DialogBusy, DialogFailed, PinCancelled, PinPromptUnavailable
+from .ui import UiBusy
 
 
-PIN_TIMEOUT_SECONDS = 120
-MAX_DOCUMENT_NAME = 140
+def _build_request(origin, document_name, *, warnings=(), final_try=False) -> dict:
+	"""The dialog request for one PIN prompt (spec §6 wire schema)."""
+	return {
+		"v": dialog_child.PROTOCOL_VERSION,
+		"kind": "pin",
+		"origin": origin,
+		"claims": [document_name] if document_name else [],
+		"warnings": list(warnings),
+		"final_try": bool(final_try),
+		"timeout": dialog_child.DEFAULT_DIALOG_SECONDS,
+	}
 
 
-def build_pin_text(origin: str, document_name: str | None) -> str:
-	lines = [
-		"Sign with your USB DSC token?",
-		"",
-		"Requested by:",
-		origin,
-		"",
-	]
-	name = (document_name or "").strip()[:MAX_DOCUMENT_NAME]
-	if name:
-		lines += [
-			f"Document (as described by the site): {name}",
-			"",
-		]
-	lines.append("Enter your USB DSC token PIN to sign:")
-	return "\n".join(lines)
+def request_pin(origin, document_name, *, host, warnings=(), final_try=False) -> str:
+	"""Show the PIN dialog through `host` and return the PIN the user typed.
 
-
-def request_pin(origin: str, document_name: str | None = None, *, timeout_seconds: int = PIN_TIMEOUT_SECONDS) -> str:
-	"""Prompt for the token PIN.  Must run on the DialogHost worker thread."""
-	import tkinter as tk
-	from tkinter import simpledialog
-
+	Raises PinCancelled, PinPromptUnavailable(cause), DialogBusy or DialogWedged
+	(spec §6); the last propagates unchanged from the host.
+	"""
+	request = _build_request(origin, document_name, warnings=warnings, final_try=final_try)
+	reply = cause = None
+	busy = False
 	try:
-		root = new_tk_root()
-	except UiUnavailable as exc:
-		raise PinPromptUnavailable() from exc
+		reply = host.run_dialog(request)
+	except DialogFailed as exc:
+		cause = exc.cause
+	except UiBusy:
+		busy = True
 
-	try:
-		# Bound the wait so a prompt nobody answers cannot hold the UI thread forever.
-		root.after(int(timeout_seconds * 1000), root.quit)
-		pin = simpledialog.askstring(
-			"ERP DSC Signer",
-			build_pin_text(origin, document_name),
-			show="*",
-			parent=root,
-		)
-	except Exception as exc:
-		raise PinPromptUnavailable() from exc
-	finally:
-		try:
-			root.destroy()
-		except Exception:
-			pass
+	# Raised here, outside the handlers: __context__ stays empty.
+	if busy:
+		raise DialogBusy() from None
+	if cause is not None:
+		raise PinPromptUnavailable(cause) from None
 
-	if not pin:
+	result = reply.get("result") if type(reply) is dict else None
+	if result == "entered":
+		value = reply.get("value")
+		if type(value) is str and value:
+			return value
+		raise PinPromptUnavailable("dialog_bad_reply")
+	if result == "cancelled":
 		raise PinCancelled()
-	return pin
+	if result == "timeout":
+		raise PinPromptUnavailable("dialog_timeout")
+	if result == "unavailable" and reply.get("cause") in dialog_child.UNAVAILABLE_CAUSES:
+		raise PinPromptUnavailable(reply["cause"])
+	# The host validates every reply, so this is unreachable with the real one: fail closed.
+	raise PinPromptUnavailable("dialog_bad_reply")

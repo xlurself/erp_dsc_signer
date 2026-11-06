@@ -61,7 +61,7 @@ async function sign_with_usb(frm, replace, provider, base_url) {
 		const prepared = await frappe_request("erp_dsc_signer.api.signing.prepare_usb_signing", {name: frm.doc.name, replace, provider});
 		const certificate = await select_local_certificate(base_url, provider);
 		const sign_nonce = await local_request(base_url, "/v1/nonce", "POST", {purpose: "sign"});
-		frappe.dom.freeze(__("Approve the local USB DSC PIN dialog..."));
+		frappe.dom.freeze(__("Click the signer window, then type your PIN"));
 		const signed = await local_request(base_url, "/v1/sign", "POST", {
 			nonce: sign_nonce.nonce,
 			provider,

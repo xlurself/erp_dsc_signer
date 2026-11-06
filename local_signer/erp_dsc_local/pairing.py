@@ -14,6 +14,16 @@ serve an endpoint that echoes its own origin back.  So:
   * the site name and user returned by the callback are CLAIMS by that site and are
     labelled as such in the dialog, never as "verified";
   * rate limiting, not the callback, is what protects the user from prompt spam.
+
+The claims are sanitised where they enter (``verify_pairing_proof``) with the dialog's
+own rule (``dialog_child.clean_claim``), so the trust store, the /v1/pair response and
+the CLI never hold raw site text: an over-long claim becomes "(claim too long)"; a
+NO-BREAK SPACE (U+00A0) counts as an ordinary space; one with any control, format,
+surrogate, private-use, unassigned or line/paragraph-separator character, any space
+separator other than U+0020, or an invisible filler (``dialog_child.INVISIBLE_FILLERS``)
+becomes "(unreadable claim removed)" -- except a zero-width joiner/non-joiner next to a
+virama, which Indic names need.  Runs of spaces are collapsed and the ends stripped;
+a claim left empty is unreadable.  Nothing is silently truncated.
 """
 
 from __future__ import annotations
@@ -27,8 +37,10 @@ import urllib.request
 from dataclasses import dataclass
 from threading import Lock
 
-from .errors import PairProofInvalid, PairRateLimited
+from . import dialog_child
+from .errors import DialogBusy, DialogFailed, PairPromptUnavailable, PairProofInvalid, PairRateLimited
 from .origins import canonical_origin, is_transport_secure
+from .ui import UiBusy
 
 
 VERIFY_PATH = "/api/method/erp_dsc_signer.api.pairing.verify_pairing_token"
@@ -37,15 +49,25 @@ CALLBACK_MAX_BYTES = 8 * 1024
 
 MAX_ATTEMPTS_PER_HOUR = 10
 GLOBAL_COOLDOWN_SECONDS = 60
-DIALOG_TIMEOUT_SECONDS = 60
+
+HTTP_WARNING = "WARNING: this site uses an unencrypted (http) connection."
 
 
 @dataclass(frozen=True)
 class SiteClaims:
-	"""Strings supplied by the site being paired. NOT verified identity."""
+	"""Strings supplied by the site being paired. NOT verified identity.
+
+	Built only by ``verify_pairing_proof``, which has already replaced any over-long or
+	unreadable value with the dialog's visible placeholder.
+	"""
 
 	site_name: str = ""
 	user: str = ""
+
+
+def sanitise_claim(value: object) -> str:
+	"""One site-supplied value, cleaned by the SAME rule the dialog applies (spec §6)."""
+	return dialog_child.clean_claim(str(value or ""))
 
 
 class PairGuard:
@@ -157,95 +179,67 @@ def verify_pairing_proof(origin: str, token: str, *, opener=None) -> SiteClaims:
 		raise PairProofInvalid() from exc
 
 	return SiteClaims(
-		site_name=str(message.get("site_name") or "")[:120],
-		user=str(message.get("user") or "")[:120],
+		site_name=sanitise_claim(message.get("site_name")),
+		user=sanitise_claim(message.get("user")),
 	)
 
 
-def build_consent_text(origin: str, claims: SiteClaims) -> str:
-	"""The consent dialog body.
+def build_consent_request(origin: str, claims: SiteClaims) -> dict:
+	"""The dialog request for one pairing prompt (spec §6 wire schema).
 
-	Origin first and unadorned: it is the only thing here the site cannot choose.
+	Origin, the site's claims (one per line) and the signer's own warnings travel as
+	separate fields; the dialog child decides how they are laid out.
 	"""
-	lines = [
-		"Allow this website to use the digital signature token on this computer?",
-		"",
-		origin,
-		"",
-	]
-	if not is_transport_secure(origin):
-		lines += [
-			"WARNING: this site uses an unencrypted (http) connection.",
-			"",
-		]
-	if claims.site_name or claims.user:
-		claimed = claims.site_name or "(unnamed)"
-		if claims.user:
-			claimed += f", signed in as {claims.user}"
-		lines += [
-			f"The site describes itself as: {claimed}",
-			"That description comes from the site itself and is not verified.",
-			"",
-		]
-	lines += [
-		"If you allow it, this site can ask your USB token to sign documents.",
-		"You will still enter your token PIN for every signature.",
-		"",
-		"Allow only if you just clicked Pair in your own ERP.",
-	]
-	return "\n".join(lines)
+	site_claims = []
+	if claims.site_name:
+		site_claims.append(claims.site_name)
+	if claims.user:
+		# No prefix: the claim is already capped at MAX_CLAIM_CHARS and the dialog labels
+		# every entry "as described by the site", so a prefix could only overflow it.
+		site_claims.append(claims.user)
+	return {
+		"v": dialog_child.PROTOCOL_VERSION,
+		"kind": "consent",
+		"origin": origin,
+		"claims": site_claims,
+		"warnings": [] if is_transport_secure(origin) else [HTTP_WARNING],
+		"final_try": False,
+		"timeout": dialog_child.DEFAULT_DIALOG_SECONDS,
+	}
 
 
-def consent_dialog(origin: str, claims: SiteClaims, *, timeout_seconds: int = DIALOG_TIMEOUT_SECONDS) -> bool:
-	"""Show the consent prompt and return True only on an explicit Allow.
+def consent_dialog(origin: str, claims: SiteClaims, *, host) -> bool:
+	"""Show the pairing prompt through `host`; True only on an explicit Allow.
 
-	Must run on the DialogHost worker thread.  Deny is the default: closing the
-	window, pressing Escape, and the timeout all return False.
+	False means the user refused (Deny, Escape or closing the window) and the caller
+	records the denial.  No answer is NOT a refusal: a timeout, a failed dialog and a
+	busy host all raise (PairPromptUnavailable, DialogBusy, DialogWedged), so no denial
+	or cooldown is recorded for them (spec §6).
 	"""
-	import tkinter as tk
-
-	from .ui import new_tk_root
-
-	root = new_tk_root()
-	answer = {"allow": False}
+	request = build_consent_request(origin, claims)
+	reply = cause = None
+	busy = False
 	try:
-		window = tk.Toplevel(root)
-		window.title("ERP DSC Signer - pairing request")
-		window.attributes("-topmost", True)
-		window.resizable(False, False)
+		reply = host.run_dialog(request)
+	except DialogFailed as exc:
+		cause = exc.cause
+	except UiBusy:
+		busy = True
 
-		tk.Label(
-			window,
-			text=build_consent_text(origin, claims),
-			justify="left",
-			font=("TkFixedFont", 12),
-			padx=18,
-			pady=14,
-			wraplength=560,
-		).pack()
+	# Raised here, outside the handlers: __context__ stays empty.
+	if busy:
+		raise DialogBusy() from None
+	if cause is not None:
+		raise PairPromptUnavailable(cause) from None
 
-		buttons = tk.Frame(window)
-		buttons.pack(pady=(0, 14))
-
-		def close(allow: bool):
-			answer["allow"] = allow
-			window.destroy()
-
-		deny = tk.Button(buttons, text="Deny", width=14, command=lambda: close(False))
-		allow = tk.Button(buttons, text="Allow", width=14, command=lambda: close(True))
-		deny.pack(side="left", padx=8)
-		allow.pack(side="left", padx=8)
-
-		deny.focus_set()
-		window.bind("<Escape>", lambda _event: close(False))
-		window.protocol("WM_DELETE_WINDOW", lambda: close(False))
-		window.after(int(timeout_seconds * 1000), lambda: close(False))
-
-		window.grab_set()
-		root.wait_window(window)
-	finally:
-		try:
-			root.destroy()
-		except Exception:
-			pass
-	return bool(answer["allow"])
+	result = reply.get("result") if type(reply) is dict else None
+	if result == "allow":
+		return True
+	if result == "deny":
+		return False
+	if result == "timeout":
+		raise PairPromptUnavailable("dialog_timeout")
+	if result == "unavailable" and reply.get("cause") in dialog_child.UNAVAILABLE_CAUSES:
+		raise PairPromptUnavailable(reply["cause"])
+	# The host validates every reply, so this is unreachable with the real one: fail closed.
+	raise PairPromptUnavailable("dialog_bad_reply")

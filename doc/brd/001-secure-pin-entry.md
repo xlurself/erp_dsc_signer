@@ -1,0 +1,46 @@
+---
+id: F1
+title: Secure local PIN and consent dialogs (macOS-safe, no secret persistence)
+priority: P0
+status: planned
+covers: [F1]
+spec: doc/spec/001-secure-pin-entry.md
+---
+
+## Summary
+On macOS the workstation signer cannot show its PIN or pairing-consent dialog: it creates the Tk window on a
+background thread and Tk aborts the process there, so USB signing cannot show the PIN dialog (the signer process aborts).
+Fix it by showing each dialog in its own short-lived child process, WITHOUT weakening the trust model.
+
+Trust model, in one paragraph: the DSC private key never leaves the token and signing happens inside the token.
+The PIN is typed only into a native window on the user's own computer; it travels only on a private pipe to the
+signer and into the single token login. The ERP site receives only the signed PDF and certificate details.
+This follows the standard pattern of DSC signing tools. It protects against a malicious or compromised website,
+a page script, a network attacker, other users of the computer, and files/logs/backups. It does NOT protect against
+malware already running as the same user or as administrator; no software can, and that limit is stated openly.
+Known limitation of this release: tokens that hide their certificates until the PIN is entered are not supported; the signer says so clearly instead of failing with a misleading message.
+
+## Acceptance criteria
+- On macOS, USB signing shows a PIN dialog on the desktop and the PIN reaches the token login.
+- The pairing consent dialog also opens on macOS and returns Allow/Deny correctly. Closing the window and pressing Escape are a Deny. A timeout is no answer: it records no denial and the site may ask again.
+- The PIN is never written to any file, log, database or cache by this tool or the ERP site, never placed on a command line or in the environment of any process, and never sent to the ERP site or to any network endpoint. Crash dumps are disabled where the operating system allows it (macOS/Linux; on Windows this is documented as not covered). Operating-system swap, hibernation and crash reporting are outside the tool's control and are documented as residual risk.
+- The private key never leaves the token: the tool never reads, exports, copies or stores key material, and signing is performed by the token.
+- The ERP site (Frappe) never receives, stores or logs a USB PIN or private key; only the signed PDF and certificate metadata.
+- Token protection: the PIN is submitted once per entry, only to the token the user selected; failed attempts are limited per token (the count resets if the signer is restarted); a wrong PIN and a locked token produce different, clearly worded errors so a user is not led to lock the token by retrying blindly.
+- The documented threat model states who the tool protects against and who it cannot (same-user malware, administrator).
+- Audit: ERPNext records who signed which invoice and when; the record never contains a PIN or key material.
+- A crash, hang or abort of the dialog process cannot crash or hang the signer, and leaves no stray process, including when the signer is stopped mid-dialog.
+- When no desktop dialog can be shown, the user gets a specific error naming the cause, not a generic message.
+
+## Done when
+- A unit test proves the child receives its inputs on stdin only: no caller data and no PIN appears in argv or env.
+- A unit test proves a sentinel PIN does not appear in captured logs, daemon stderr, exception text or attributes, or in any file under the test home, temp and config directories, on the success, cancel, timeout, crash, oversized-output and bad-reply paths.
+- A unit test proves a dialog child that exceeds the deadline is killed and reaped, that shutdown kills an in-flight child, and that a child exits when its parent dies.
+- A unit test proves a child that aborts (negative exit code) yields the "dialog crashed" error and not a crash of the signer.
+- A unit test proves the PIN is submitted exactly once and only to the slot whose token serial matches the selected certificate, never looped across slots.
+- A unit test proves a wrong PIN, a locked token and the per-token failed-attempt limit each return their own distinct error.
+- Automated gates prove no code outside the dialog module creates a Tk window, the browser sign request carries no `pin` field, and the Frappe app has no USB PIN parameter.
+- A test with a recording fake token proves the signer never requests private-key attributes or exports key material during listing and signing; signing goes through the token's PKCS#11 sign call only.
+- A test proves the audit record written on signing contains the user, invoice and time and no PIN or key material.
+- A test proves the pairing consent dialog logic: Deny on close and Escape, no denial recorded on timeout, Allow only by explicit action.
+- Manual boot-and-click on macOS: signing XL-SI-26-0000014 with the Watchdata token prompts for the PIN and attaches a signed PDF.

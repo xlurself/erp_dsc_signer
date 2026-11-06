@@ -1,0 +1,6 @@
+{
+  "schema": "omai-testing/1.0",
+  "command": "cd local_signer && python -m unittest discover -s tests",
+  "baseline": null,
+  "note": "Declare `command` yourself. `baseline` is written by the test harness on a fully-green run \u2014 never by hand."
+}
