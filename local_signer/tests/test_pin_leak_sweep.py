@@ -38,6 +38,7 @@ from erp_dsc_local.pin import request_pin
 from erp_dsc_local.service import HANDLER_ERROR_LINE, SignerService
 from erp_dsc_local.trust import TrustStore
 from erp_dsc_local.ui import DialogHost
+from test_signature_meta import server_meta  # the full meta the ERP sends
 
 
 STUB = Path(__file__).resolve().parent / "_stub_child.py"
@@ -240,7 +241,7 @@ class LeakSweepCase(unittest.TestCase):
 				"nonce": issued["nonce"],
 				"pdf_base64": base64.b64encode(PDF).decode("ascii"),
 				"pdf_sha256": hashlib.sha256(PDF).hexdigest(),
-				"signing_request": {"signature_meta": {"reason": "test"}, "document_name": document_name},
+				"signing_request": {"signature_meta": server_meta(), "document_name": document_name},
 				"pin": BODY_SENTINEL,
 			},
 		)

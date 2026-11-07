@@ -34,6 +34,7 @@ from erp_dsc_local.service import (
 )
 from erp_dsc_local.trust import TrustStore
 from erp_dsc_local.ui import DialogHost
+from test_signature_meta import server_meta  # the full meta the ERP sends
 
 
 PACKAGE = Path(service_module.__file__).resolve().parent
@@ -183,7 +184,7 @@ class LimiterCase(unittest.TestCase):
 				"nonce": issued["nonce"],
 				"pdf_base64": base64.b64encode(PDF).decode("ascii"),
 				"pdf_sha256": hashlib.sha256(PDF).hexdigest(),
-				"signing_request": {"signature_meta": {"reason": "test"}, "document_name": document_name},
+				"signing_request": {"signature_meta": server_meta(), "document_name": document_name},
 			},
 		)
 

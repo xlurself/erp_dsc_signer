@@ -26,7 +26,7 @@ from erp_dsc_local.errors import PinIncorrect, TokenSigningFailed
 from erp_dsc_local.token import SIGNING_FAILED_LOG
 
 MESSAGE = "The USB token could not sign the document."
-
+CMS_CLASSES = (TypeError, AttributeError, ImportError, ModuleNotFoundError, FileNotFoundError, OSError, ValueError, KeyError)
 
 
 class PKC(PK):
@@ -86,23 +86,35 @@ class SigningPathCase(unittest.TestCase):
 		patcher.start()
 		self.addCleanup(patcher.stop)
 
-	def fail(self, *, attribute=None, factory=None, timestamp_error=None, pk=PKC):
-		"""Sign once with the real TokenClient; return the error it raised."""
+	def fail(self, *, attribute=None, factory=None, timestamp_error=None, before_sign_error=None, timestamp_url=None, pk=PKC):
+		"""Sign once with the real TokenClient; return the error it raised.
+
+		``timestamp_error`` is raised after the C_Sign (where endesive asks the TSA),
+		``before_sign_error`` before any C_Sign (endesive building the PDF)."""
 		lib = two_slot_lib()
 		if attribute:
 			setattr(lib, attribute, factory)
 		client = make_client(lib)
 		client.pk = pk
 		selected, certificates = client.select(None)
+		self.cms.timestamp_step = self.cms.before_sign_step = None
 		if timestamp_error is not None:
 
 			def step(hsm):
 				raise timestamp_error(lib.received_pin)
 
 			self.cms.timestamp_step = step
+		if before_sign_error is not None:
+
+			def before(hsm):
+				raise before_sign_error(SENTINEL_PIN)
+
+			self.cms.before_sign_step = before
 		self.lib = lib
 		try:
-			client.sign_pdf(b"%PDF", selected, certificates, {"reason": "x"}, SENTINEL_PIN, None, login_guard=FakeGuard(lib.log))
+			client.sign_pdf(
+				b"%PDF", selected, certificates, {"reason": "x"}, SENTINEL_PIN, timestamp_url, login_guard=FakeGuard(lib.log)
+			)
 		except BaseException as error:
 			return error
 		raise AssertionError("expected TOKEN_SIGNING_FAILED")
@@ -140,10 +152,49 @@ class TestEachStage(SigningPathCase):
 		self.assert_failure(self.fail(attribute="sign_error", factory=lambda pin: AttributeError(pin)), "c_sign", "AttributeError")
 
 	def test_cms_by_class(self):
-		for error_type in (TypeError, AttributeError, ImportError, ModuleNotFoundError, FileNotFoundError, OSError, ValueError, KeyError):
+		for error_type in CMS_CLASSES:
 			with self.subTest(error=error_type.__name__):
 				self.assert_failure(self.fail(timestamp_error=error_type), "cms", error_type.__name__)
 				self.assertIn(("logout", 2), self.lib.log)
+
+	def test_assertion_and_index_errors_are_named(self):
+		"""endesive's ``assert`` on an ``aligned`` too small for the signature and PyPDF2's
+		``getPage`` for a ``sigpage`` past the last page."""
+		for error_type in (AssertionError, IndexError):
+			with self.subTest(error=error_type.__name__):
+				self.assert_failure(self.fail(before_sign_error=error_type), "cms", error_type.__name__)
+				self.assertEqual([], self.lib.logins)
+				self.assert_failure(self.fail(timestamp_error=error_type), "cms", error_type.__name__)
+				self.assertEqual(1, len(self.lib.logins))
+
+	def test_with_a_tsa_any_failure_after_the_c_sign_is_tsa(self):
+		"""A TSA that answers but refuses makes endesive raise a plain ValueError (signer.py
+		~143/145; requests does not raise on a 4xx/5xx), so the class alone cannot say it was
+		the TSA.  With a ``timestamp_url``, a failure after the C_Sign returned is ``tsa``."""
+
+		class Boom(Exception):
+			pass
+
+		for error_type in (*CMS_CLASSES, AssertionError, IndexError, Boom, RuntimeError):
+			name = error_type.__name__ if error_type not in (Boom, RuntimeError) else "other"
+			with self.subTest(error=error_type.__name__):
+				self.assert_failure(self.fail(timestamp_error=error_type, timestamp_url="https://tsa.invalid/"), "tsa", name)
+				self.assertEqual(["login", "sign"], [e[0] for e in self.lib.log if e[0] in ("login", "sign")])
+				self.assertIn(("logout", 2), self.lib.log)
+
+	def test_with_a_tsa_a_failure_before_any_c_sign_is_still_cms(self):
+		for error_type in (ValueError, IndexError, KeyError):
+			with self.subTest(error=error_type.__name__):
+				self.assert_failure(self.fail(before_sign_error=error_type, timestamp_url="https://tsa.invalid/"), "cms", error_type.__name__)
+				self.assertEqual([], self.lib.logins)
+
+	def test_with_a_tsa_a_failed_c_sign_is_still_c_sign(self):
+		factory = lambda pin: PKC.PyKCS11Error(PKC.CKR_MECHANISM_INVALID, f"pin={pin}")
+		error = self.fail(attribute="sign_error", factory=factory, timestamp_url="https://tsa.invalid/")
+		self.assert_failure(error, "c_sign", "PyKCS11Error", "CKR_MECHANISM_INVALID")
+
+	def test_without_a_tsa_a_failure_after_the_c_sign_is_cms(self):
+		self.assert_failure(self.fail(timestamp_error=ValueError, timestamp_url=None), "cms", "ValueError")
 
 	def test_tsa_is_any_requests_exception(self):
 		exceptions = requests.exceptions
@@ -237,6 +288,18 @@ class TestTheDiagnosticNeverCarriesThePin(SigningPathCase):
 			(dict(timestamp_error=lambda pin: hostile_class(requests.exceptions.ReadTimeout)(pin)), ("tsa", "other", None)),
 			(dict(timestamp_error=lambda pin: requests.exceptions.ReadTimeout(f"read timed out, pin={pin}")), ("tsa", "ReadTimeout", None)),
 			(dict(timestamp_error=lambda pin: LyingNameError(pin)), ("cms", "other", None)),
+			(dict(timestamp_error=lambda pin: AssertionError(f"assert pin={pin}")), ("cms", "AssertionError", None)),
+			(dict(timestamp_error=lambda pin: IndexError(f"list index pin={pin}")), ("cms", "IndexError", None)),
+			(dict(timestamp_error=lambda pin: hostile_class(AssertionError)(pin)), ("cms", "other", None)),
+			(dict(timestamp_error=lambda pin: hostile_class(IndexError)(pin)), ("cms", "other", None)),
+			(
+				dict(timestamp_error=lambda pin: ValueError(f"TimeStampResponse pin={pin}"), timestamp_url="https://tsa.invalid/"),
+				("tsa", "ValueError", None),
+			),
+			(
+				dict(timestamp_error=lambda pin: hostile_class(AssertionError)(pin), timestamp_url="https://tsa.invalid/"),
+				("tsa", "other", None),
+			),
 		]
 		for kwargs, expected in cases:
 			with self.subTest(expected=expected):

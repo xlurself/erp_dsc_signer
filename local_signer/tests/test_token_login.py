@@ -137,6 +137,7 @@ class FakeSession:
 
 	def sign(self, key, data, mechanism):
 		self.lib.log.append(("sign", self.slot, key))
+		self.lib.mechanisms.append(mechanism)
 		if self.lib.sign_error:
 			raise self.lib.sign_error(self.lib.received_pin)
 		return list(b"SIG-" + bytes(data))
@@ -153,7 +154,7 @@ class FakeLib:
 
 	def __init__(self, tokens):
 		self.tokens = tokens
-		self.log, self.logins, self.attribute_reads = [], [], []
+		self.log, self.logins, self.attribute_reads, self.mechanisms = [], [], [], []
 		self.private_handles = {handle for token in tokens.values() for handle, _ in token["keys"]}
 		self.login_error = self.sign_error = self.find_key_error = None
 		self.received_pin = None
@@ -211,6 +212,10 @@ class FakeCms:
 		self.first_error = None
 		# Runs after hsm.sign, where endesive makes its timestamp request; may raise.
 		self.timestamp_step = None
+		# Runs before the first hsm.sign (endesive building the PDF); may raise.
+		self.before_sign_step = None
+		# What endesive passes to hsm.sign: the digest it took from the PDF (cms.py ~715-727).
+		self.algorithm = "sha256"
 
 	def sign(self, datau, udct, key, cert, othercerts, algomd, hsm=None, timestampurl=None, timestamp_req_options=None):
 		self.hsm = hsm
@@ -218,13 +223,15 @@ class FakeCms:
 		self.timestamp_options.append(timestamp_req_options)
 		key_id, _certificate = hsm.certificate()
 		signature = b""
+		if self.before_sign_step is not None:
+			self.before_sign_step(hsm)
 		if self.retry_after_error:
 			try:
-				hsm.sign(key_id, b"attrs", "sha256")
+				hsm.sign(key_id, b"attrs", self.algorithm)
 			except LocalSignerError as error:
 				self.first_error = error
 		for _ in range(self.sign_rounds):
-			signature = hsm.sign(key_id, b"attrs", "sha256")
+			signature = hsm.sign(key_id, b"attrs", self.algorithm)
 		self.pin_seen_by_hsm = hsm.pin
 		if self.timestamp_step is not None:
 			self.timestamp_step(hsm)

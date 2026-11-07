@@ -172,10 +172,43 @@ TYPE_CONFUSION = [
 	],
 	*[("signature_appearance", v) for v in ("x", [], None, 5)],
 ]
+# A known key whose value is not the one the ERP always sends (pdf_signer._signature_metadata).
+# ``sigandcertify`` True turns the approval signature into a DocMDP certification.
+PINNED_CONFUSION = [
+	*[("aligned", v) for v in (0, 1, 16, 4096, 32767, 32769, 65536)],
+	*[("sigflags", v) for v in (0, 1, 2)],
+	*[("sigflagsft", v) for v in (0, 1, 128, 133, 1023)],
+	("sigandcertify", True),
+	("auto_sigfield", False),
+	*[("application", v) for v in ("ERPNext-v14.1_x", "erpnext", "ERPNEXT", "ERPNext2", "Frappe", "ERPNext.")],
+	*[("sigfield", v) for v in ("a.b", ".", "ERPNextSignature.", ".ERPNextSignature", "ERPNext.Signature")],
+]
+# ``display`` is written RAW into the appearance content stream after a UTF-16BE -> latin-1
+# conversion (PyPDF2_annotate graphics.py ``'({}) Tj'``): a character with a 0x28 '(',
+# 0x29 ')' or 0x5C '\' byte, or above U+FFFF (a surrogate pair), can end the string and
+# write operators.  U+2829 is '()' raw; U+7265 / U+546A are the operators 're' / 'Tj'.
+DISPLAY_BREAKOUTS = [
+	"(",
+	")",
+	"\\",
+	"a) Tj ET 0 0 1 rg 0 0 500 500 re f BT (b",
+	"back\\slash",
+	"ok (balanced)",
+	"\u2829",
+	"\u2829\u7265\u546a",
+	"x\u2900",
+	"\u5c00",
+	"\u0128",  # LATIN CAPITAL LETTER I WITH TILDE: 01 28
+	"\u015c",  # LATIN CAPITAL LETTER S WITH CIRCUMFLEX: 01 5C
+	"\u0929",  # DEVANAGARI LETTER NNNA: 09 29
+	"Digitally signed by \u0935\u093f\u0928\u092f",  # DEVANAGARI NA is 09 28
+	"\U0001f600",
+	"\U00028029",
+]
 APPEARANCE_CONFUSION = [
 	*[
 		("display", v)
-		for v in ("a" * 501, "a\rb", "a\x1bb", "a\u202eb", ["CN", "DN"], 5, None, {"a": 1})
+		for v in ("a" * 501, "a\rb", "a\x1bb", "a\u202eb", ["CN", "DN"], 5, None, {"a": 1}, *DISPLAY_BREAKOUTS)
 	],
 	*[("outline", v) for v in ([0, 0], [0, 0, 0, 0], [0, 0, 256], [0, 0, -1], [0, 0, True], [0.0, 0, 0], "black", None)],
 	*[("border", v) for v in (11, -1, True, "0", 0.0, None)],
@@ -183,13 +216,45 @@ APPEARANCE_CONFUSION = [
 NOT_A_DICT = [None, [], "x", 5, [("reason", "x")]]
 
 
+def without_top(key):
+	meta = server_meta()
+	del meta[key]
+	return meta
+
+
+def without_appearance(key):
+	meta = server_meta()
+	del meta["signature_appearance"][key]
+	return meta
+
+
+# The ERP always sends every key: an incomplete meta used to pass and then fail only after
+# the PIN dialog, C_Login and C_Sign (a KeyError inside endesive), or sign something else.
+INCOMPLETE = [
+	("empty", {}),
+	("reason-only", {"reason": "test"}),
+	("appearance-only", {"signature_appearance": {}}),
+	("signingdate-only", {"signingdate": "D:20261106120000Z"}),
+	(
+		"three-key-unaligned",
+		{"sigflags": 3, "contact": "signer@example.invalid", "signingdate": "D:20261106120000+05'30'"},
+	),
+	("empty-appearance", with_top("signature_appearance", {})),
+	("icon-only-appearance", with_top("signature_appearance", {"icon": SERVER_ICON})),
+]
+
+
 def hostile_metas():
 	"""Every meta that must be refused, with a label for subTest."""
 	cases = [(f"top:{key}", with_top(key, value)) for key, value in HOSTILE_KEYS]
 	cases += [(f"appearance:{key}", with_appearance(key, value)) for key, value in HOSTILE_APPEARANCE]
 	cases += [(f"type:{key}={value!r:.40}", with_top(key, value)) for key, value in TYPE_CONFUSION]
+	cases += [(f"pinned:{key}={value!r:.40}", with_top(key, value)) for key, value in PINNED_CONFUSION]
 	cases += [(f"appearance-type:{key}={value!r:.40}", with_appearance(key, value)) for key, value in APPEARANCE_CONFUSION]
 	cases += [(f"meta:{value!r}", value) for value in NOT_A_DICT]
+	cases += [(f"incomplete:{label}", meta) for label, meta in INCOMPLETE]
+	cases += [(f"missing:{key}", without_top(key)) for key in sorted(server_meta())]
+	cases += [(f"missing-appearance:{key}", without_appearance(key)) for key in sorted(server_meta()["signature_appearance"])]
 	# icon is dropped only inside signature_appearance; at the top level it is unknown.
 	cases.append(("top:icon", with_top("icon", "/etc/hosts")))
 	return cases
@@ -230,6 +295,14 @@ class TestServerShapeIsTheAllowlist(unittest.TestCase):
 					appearance.add(target.slice.value)
 		self.assertEqual(set(server_meta()), {key.value for key in returned.keys})
 		self.assertEqual(set(server_meta_with_icon()["signature_appearance"]), appearance)
+		# Every literal the server sends is the value pinned here (aligned, sigflags, ...).
+		literals = {key.value: value.value for key, value in zip(returned.keys, returned.values) if isinstance(value, ast.Constant)}
+		self.assertEqual(
+			{"aligned", "sigflags", "sigflagsft", "sigbutton", "sigfield", "auto_sigfield", "sigandcertify", "application"},
+			set(literals),
+		)
+		for key, value in literals.items():
+			self.assertEqual((type(server_meta()[key]), server_meta()[key]), (type(value), value), key)
 
 
 class TestSanitise(unittest.TestCase):
@@ -251,10 +324,56 @@ class TestSanitise(unittest.TestCase):
 		meta["signaturebox"].append(1)
 		self.assertEqual(server_meta(), clean)
 
-	def test_a_subset_of_the_server_keys_passes(self):
-		for meta in ({}, {"reason": "test"}, {"signature_appearance": {}}, {"signingdate": "D:20261106120000Z"}):
-			with self.subTest(meta=meta):
-				self.assertEqual(meta, sanitise(meta))
+	def test_an_incomplete_meta_is_refused(self):
+		for label, meta in INCOMPLETE:
+			with self.subTest(case=label):
+				with self.assertRaises(LocalSignerError) as ctx:
+					sanitise(meta)
+				self.assertEqual(("INVALID_REQUEST", UNSUPPORTED), (ctx.exception.code, ctx.exception.message))
+
+	def test_every_key_the_server_sends_is_required(self):
+		for key in server_meta():
+			with self.subTest(key=key):
+				with self.assertRaises(LocalSignerError):
+					sanitise(without_top(key))
+		for key in server_meta()["signature_appearance"]:
+			with self.subTest(appearance=key):
+				with self.assertRaises(LocalSignerError):
+					sanitise(without_appearance(key))
+
+	def test_the_values_the_server_always_sends_are_pinned(self):
+		for key, value in PINNED_CONFUSION:
+			with self.subTest(key=key, value=value):
+				with self.assertRaises(LocalSignerError) as ctx:
+					sanitise(with_top(key, value))
+				self.assertEqual(("INVALID_REQUEST", UNSUPPORTED), (ctx.exception.code, ctx.exception.message))
+		clean = sanitise(server_meta())
+		self.assertEqual(
+			(32768, 3, 132, False, True, "ERPNext"),
+			tuple(clean[key] for key in ("aligned", "sigflags", "sigflagsft", "sigandcertify", "auto_sigfield", "application")),
+		)
+		for key in ("sigandcertify", "auto_sigfield"):
+			self.assertIs(bool, type(clean[key]))
+		# sigbutton is inert in endesive 2.19.3 (never read): either value passes.
+		self.assertEqual(with_top("sigbutton", False), sanitise(with_top("sigbutton", False)))
+
+	def test_a_display_that_could_end_the_pdf_string_is_refused(self):
+		for display in DISPLAY_BREAKOUTS:
+			with self.subTest(display=display):
+				with self.assertRaises(LocalSignerError) as ctx:
+					sanitise(with_appearance("display", display))
+				self.assertEqual(("INVALID_REQUEST", UNSUPPORTED), (ctx.exception.code, ctx.exception.message))
+
+	def test_the_byte_rule_refuses_exactly_the_delimiter_bytes_in_the_bmp(self):
+		delimiters = {0x28, 0x29, 0x5C}
+		for code in range(0x20, 0x10000):
+			ch = chr(code)
+			if service_module._text(1)(ch) is service_module._INVALID:
+				continue  # refused by the claim rule already
+			breaks = (code >> 8) in delimiters or (code & 0xFF) in delimiters
+			accepted = service_module._display(ch) is not service_module._INVALID
+			if accepted == breaks:
+				self.fail(f"U+{code:04X}: accepted={accepted} but carries a delimiter byte={breaks}")
 
 	def test_readable_values_at_the_limits_pass(self):
 		eyelash_ra = "\u0930\u094d\u200d\u092f"  # RA VIRAMA ZWJ YA: a joiner Indian names need
@@ -263,19 +382,26 @@ class TestSanitise(unittest.TestCase):
 			("location", "\u092e\u0941\u0902\u092c\u0908 " + eyelash_ra),
 			("reason", "Signed\u00a0invoice"),
 			("contact", ""),
-			("aligned", 0),
-			("aligned", 65536),
-			("sigflags", 0),
-			("sigflagsft", 1023),
+			("sigpage", 0),
 			("sigpage", 99999),
+			("sigfield", "ERPNext_Signature-2"),
 			("signaturebox", [340.5, -45, 14400, 130]),
-			("application", "ERPNext-v14.1_x"),
 			("signingdate", "D:20261106120000-03'30'"),
 		]
 		for key, value in cases:
 			with self.subTest(key=key, value=value):
 				self.assertEqual(with_top(key, value), sanitise(with_top(key, value)))
-		for key, value in (("display", "x" * 500), ("display", "a\nb\n\nc"), ("outline", [255, 255, 255]), ("border", 10)):
+		displays = (
+			"x" * 500,
+			"a\nb\n\nc",
+			"Digitally signed by Vinay Saraf\nDate: 2026.11.06 12:00:00 +05'30'",
+			"Digitally signed by VINAY KUMAR SARAF\nDate: 2026.11.06 23:59:59 -03'30'",
+			"Digitally signed by \u0935\u093f\u091c\u092f \u0936\u0930\u094d\u092e\u093e",  # vijay sharma
+			"Digitally signed by J\u00f6rg M\u00fcller-\u00c5str\u00f6m [ACME] {x} <y> 50% #1",
+		)
+		appearance_cases = [("display", value) for value in displays]
+		appearance_cases += [("outline", [255, 255, 255]), ("border", 10)]
+		for key, value in appearance_cases:
 			with self.subTest(key=key, value=value):
 				self.assertEqual(with_appearance(key, value), sanitise(with_appearance(key, value)))
 
@@ -403,6 +529,19 @@ class TestRealEndesive(unittest.TestCase):
 		signed, metadata = self.sign(sanitise(server_meta_with_icon()))
 		verified = self.integ._load_usb_signer().verify_usb_signed_pdf(self.pdf, signed, metadata)
 		self.assertEqual(self.leaf.fingerprint(self.integ.hashes.SHA256()).hex(), verified["fingerprint_sha256"])
+
+	def test_sigandcertify_true_certifies_the_document_and_is_refused(self):
+		"""endesive turns ``sigandcertify`` True into a DocMDP certification (a catalog
+		/Perms), and the server verifier accepts it as the approval signature it asked for."""
+		certify = with_top("sigandcertify", True)
+		signed, metadata = self.sign(certify)
+		self.assertIn(b"/DocMDP", signed[len(self.pdf) :])
+		self.integ._load_usb_signer().verify_usb_signed_pdf(self.pdf, signed, metadata)  # accepted
+		with self.assertRaises(LocalSignerError) as ctx:
+			sanitise(certify)
+		self.assertEqual(("INVALID_REQUEST", UNSUPPORTED), (ctx.exception.code, ctx.exception.message))
+		signed, _metadata = self.sign(sanitise(server_meta()))
+		self.assertNotIn(b"/DocMDP", signed[len(self.pdf) :])
 
 	def test_a_local_file_named_by_the_site_is_embedded_unless_dropped(self):
 		from PIL import Image

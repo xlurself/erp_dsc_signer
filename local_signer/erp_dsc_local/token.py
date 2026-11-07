@@ -15,6 +15,10 @@ exception's text, args and traceback are never read, so a driver, endesive or a 
 echoes the PIN cannot put it there.  The same three fields go to stderr as one fixed line
 (``SIGNING_FAILED_LOG``).
 
+Digest (spec §7): ``_TokenHSM.sign`` signs with ``CKM_SHA256_RSA_PKCS`` only and refuses any
+other digest endesive asks for (one taken from the PDF's own /Perms /DocMDP) before
+``C_Login``, as ``TOKEN_SIGNING_FAILED`` stage ``c_sign``.
+
 PIN lifetime (I7): ``_TokenHSM`` drops its reference to the PIN as soon as ``C_Login``
 returns or raises, so the PIN is not held through signing or the timestamp request.
 Residual: PyKCS11's ``Session.login`` copies the PIN into its own byte list for
@@ -212,9 +216,10 @@ class TokenClient:
 		The timestamp request is bounded by ``TSA_TIMEOUT_SECONDS``.  Any exception from
 		endesive that is not a ``LocalSignerError`` (a TSA timeout, a refused connection, a
 		bad reply) becomes ``TOKEN_SIGNING_FAILED`` with fixed text, raised outside the
-		``except``, with stage ``tsa`` if it is a requests exception and ``cms`` otherwise
-		(see the module docstring for ``details``); in every case the session is logged out
-		and closed before this returns.
+		``except``, with stage ``tsa`` if it is a requests exception or if ``timestamp_url``
+		is set and a C_Sign had already returned, and ``cms`` otherwise (see the module
+		docstring for ``details``); in every case the session is logged out and closed
+		before this returns.
 		"""
 		adapter = _TokenHSM(self, selected, pin, login_guard)
 		pin = None
@@ -237,7 +242,12 @@ class TokenClient:
 			except LocalSignerError:
 				raise
 			except Exception as exc:
-				diagnosis = ("tsa" if _is_timestamp_error(exc) else "cms", _diagnosis(exc, self.pk))
+				# A TSA that answers but refuses is no requests exception: endesive raises a
+				# plain ValueError (signer.py ~143/145), as asn1crypto does for a status-only
+				# reply.  With a TSA, whatever fails after a C_Sign returned is stage "tsa".
+				after_c_sign_with_tsa = timestamp_url is not None and adapter.c_sign_returned
+				stage = "tsa" if after_c_sign_with_tsa or _is_timestamp_error(exc) else "cms"
+				diagnosis = (stage, _diagnosis(exc, self.pk))
 			if diagnosis is not None:
 				raise _signing_failed(*diagnosis) from None
 			return pdf_bytes + appended, selected.metadata
@@ -330,6 +340,7 @@ class _TokenHSM:
 		self.session = None
 		self.logged_in = False
 		self.login_attempted = False
+		self.c_sign_returned = False  # set once a C_Sign has returned a signature
 
 	def certificate(self):
 		"""``(CKA_ID, DER)``.  endesive loads the HSM certificate with asn1crypto from bytes
@@ -341,10 +352,14 @@ class _TokenHSM:
 
 	def sign(self, key_id, data, hash_algorithm):
 		pk = self.client.pk
-		mechanism_name = f"CKM_{str(hash_algorithm).upper()}_RSA_PKCS"
-		mechanism = getattr(pk, mechanism_name, None)
-		if mechanism is None:
-			raise LocalSignerError("UNSUPPORTED_ALGORITHM", f"Token does not support {hash_algorithm} RSA signing.")
+		# SHA-256 only (spec §7).  endesive does not keep the "sha256" sign_pdf passes: a PDF
+		# whose catalog has /Perms /DocMDP /Reference[0] /DigestMethod makes it sign with THAT
+		# digest (cms.py ~715-727), and PyKCS11 has CKM_MD5_RSA_PKCS and CKM_SHA1_RSA_PKCS.
+		# Anything else is refused BEFORE C_Login, so no PIN is sent for it.  The mechanism is
+		# never derived from the argument, and the argument never reaches a message or a log.
+		mechanism = getattr(pk, "CKM_SHA256_RSA_PKCS", None)
+		if type(hash_algorithm) is not str or hash_algorithm != "sha256" or type(mechanism) is not int:
+			raise _signing_failed("c_sign") from None
 		if not self.logged_in:
 			if self.login_attempted:
 				raise _signing_failed("login") from None
@@ -357,6 +372,8 @@ class _TokenHSM:
 			diagnosis = _diagnosis(exc, pk)
 		if diagnosis is not None:
 			raise _signing_failed("c_sign", diagnosis) from None
+		# From here endesive's only remaining network step is the timestamp request.
+		self.c_sign_returned = True
 		return signature
 
 	def _login(self):

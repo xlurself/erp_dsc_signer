@@ -28,10 +28,12 @@ Signature metadata
 ``signature_meta`` comes from the paired site and goes to endesive as its ``udct``.
 endesive also honours keys that read workstation files or reach the network, so the
 request is checked by ``sanitise_signature_meta`` FIRST, before the token is touched or a
-PIN is asked for: only the keys the ERP server sends, each type- and size-checked; any
-other key or a bad value is ``INVALID_REQUEST`` with one fixed message that never names
-the field.  ``signature_appearance.icon`` is dropped: it is a path on the ERP server, so a
-signature image is not supported for USB signing.
+PIN is asked for: exactly the keys the ERP server sends, all of them, each type- and
+size-checked and the constant ones pinned to the value the server sends; a missing or
+other key, a bad value or a ``signature_meta`` that is not an object is ``INVALID_REQUEST``
+with one fixed message that never names the field.  ``signature_appearance.icon`` is
+dropped: it is a path on the ERP server, so a signature image is not supported for USB
+signing.
 """
 
 from __future__ import annotations
@@ -109,10 +111,17 @@ SIGNATURE_META_UNSUPPORTED = "The signing request contains an unsupported field.
 MAX_META_TEXT_CHARS = 200
 MAX_APPEARANCE_DISPLAY_CHARS = 500
 MAX_BOX_COORDINATE = 14400  # PDF user units: the largest page PDF allows (200 in)
-# endesive 2.19.3 cms.py writes /M from signingdate and /Name from application RAW:
-# a PDF date, and a PDF name without whitespace or delimiters.  ASCII digits only.
+# Where endesive 2.19.3 puts these values: /M (signingdate), /Name (name), /Contact,
+# /Location, /Reason and the field's /T (sigfield) are PDF string objects, which PyPDF2
+# escapes; ``application`` becomes a RAW PDF name (``NameObject("/" + application)``), so it
+# is pinned to "ERPNext".  ``signature_appearance.display`` is the other RAW sink: PyPDF2_annotate (graphics.py ~264,
+# ``'({}) Tj'.format(text)``) writes it into the content stream after only a UTF-16BE ->
+# latin-1 conversion, so ``_display`` refuses any character that yields a delimiter byte.
+# ``sigbutton`` is never read by endesive 2.19.3: allowed because the ERP sends it, inert.
 _SIGNINGDATE = re.compile(r"D:[0-9]{14}(?:Z|[+-][0-9]{2}'[0-9]{2}')", re.ASCII)
-_PDF_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}", re.ASCII)
+# PDF literal-string delimiters: '(' ')' '\'.  A UTF-16BE code unit carrying one of these
+# as either byte ends the string or escapes the byte after it.
+_PDF_STRING_DELIMITER_BYTES = frozenset({0x28, 0x29, 0x5C})
 # Server-local, so never usable here; dropped without failing the request.
 DROPPED_APPEARANCE_FIELDS = frozenset({"icon"})
 _INVALID = object()
@@ -159,8 +168,27 @@ def _signature_box(value):
 	return list(value)
 
 
+def _exactly(expected):
+	"""Only ``expected`` itself, of exactly its type (so 1 is not True, nor 32768.0 32768)."""
+	return lambda value: value if type(value) is type(expected) and value == expected else _INVALID
+
+
+def _sigfield(value):
+	"""A readable field name with no '.': a period makes it a hierarchical (child) field."""
+	checked = _text(MAX_META_TEXT_CHARS)(value)
+	return _INVALID if checked is _INVALID or "." in checked else checked
+
+
+def _breaks_pdf_string(ch: str) -> bool:
+	"""Would ``ch``, as UTF-16BE bytes written raw into a ``( ) Tj`` string, end or escape it?"""
+	code = ord(ch)
+	return code > 0xFFFF or (code >> 8) in _PDF_STRING_DELIMITER_BYTES or (code & 0xFF) in _PDF_STRING_DELIMITER_BYTES
+
+
 def _display(value):
 	if type(value) is not str or len(value) > MAX_APPEARANCE_DISPLAY_CHARS:
+		return _INVALID
+	if any(_breaks_pdf_string(ch) for ch in value):
 		return _INVALID
 	line_ok = _text(MAX_APPEARANCE_DISPLAY_CHARS)
 	return value if all(line_ok(line) is not _INVALID for line in value.split("\n")) else _INVALID
@@ -183,23 +211,26 @@ def _signature_appearance(value):
 	return _checked_fields(value, _APPEARANCE_CHECKS, DROPPED_APPEARANCE_FIELDS)
 
 
-# Exactly the keys erp_dsc_signer/utils/pdf_signer.py::_signature_metadata sends.
+# Exactly the keys erp_dsc_signer/utils/pdf_signer.py::_signature_metadata sends, every one
+# of them required.  The values it always sends are pinned: ``sigandcertify`` True would
+# turn the approval signature into a DocMDP certification, and ``aligned`` 32768 keeps
+# endesive to one C_Sign.
 _META_CHECKS = {
-	"aligned": _integer(0, 65536),
-	"sigflags": _integer(0, 3),
-	"sigflagsft": _integer(0, 1023),
+	"aligned": _exactly(32768),
+	"sigflags": _exactly(3),
+	"sigflagsft": _exactly(132),
 	"sigpage": _integer(0, 99999),
-	"sigbutton": _boolean,
-	"sigfield": _text(MAX_META_TEXT_CHARS),
-	"auto_sigfield": _boolean,
-	"sigandcertify": _boolean,
+	"sigbutton": _boolean,  # inert: endesive 2.19.3 never reads it
+	"sigfield": _sigfield,
+	"auto_sigfield": _exactly(True),
+	"sigandcertify": _exactly(False),
 	"signaturebox": _signature_box,
 	"name": _text(MAX_META_TEXT_CHARS),
 	"contact": _text(MAX_META_TEXT_CHARS),
 	"location": _text(MAX_META_TEXT_CHARS),
 	"signingdate": _pattern(_SIGNINGDATE),
 	"reason": _text(MAX_META_TEXT_CHARS),
-	"application": _pattern(_PDF_NAME),
+	"application": _exactly("ERPNext"),
 	"signature_appearance": _signature_appearance,
 }
 SIGNATURE_META_FIELDS = frozenset(_META_CHECKS)
@@ -207,7 +238,8 @@ SIGNATURE_APPEARANCE_FIELDS = frozenset(_APPEARANCE_CHECKS)
 
 
 def _checked_fields(value: dict, checks: dict, dropped=frozenset()):
-	"""A NEW dict of the checked values, or ``_INVALID`` on any unknown key or bad value."""
+	"""A NEW dict of the checked values, or ``_INVALID`` on any unknown key, bad value or
+	missing key: the result holds every key of ``checks``, ``dropped`` keys left out."""
 	clean = {}
 	for key, item in value.items():
 		if type(key) is not str:
@@ -221,18 +253,25 @@ def _checked_fields(value: dict, checks: dict, dropped=frozenset()):
 		if checked is _INVALID:
 			return _INVALID
 		clean[key] = checked
+	if set(clean) != set(checks):
+		return _INVALID
 	return clean
 
 
 def sanitise_signature_meta(meta) -> dict:
-	"""The ``udct`` endesive may see: a new dict holding only allowlisted, checked values.
+	"""The ``udct`` endesive may see: a new dict holding exactly the allowlisted keys, checked.
 
-	Integers are exact ``int`` (never ``bool``) within fixed bounds; flags are exact
-	``bool``; text is at most ``MAX_META_TEXT_CHARS`` and readable (``_text``);
-	``signingdate`` is a PDF date; ``application`` a plain PDF name; ``signaturebox`` four
-	finite numbers; ``signature_appearance`` only ``display`` (newlines allowed),
-	``outline`` (three ints 0..255) and ``border`` (0..10).  ``signature_appearance.icon``
-	is dropped (see the module docstring).  Anything else raises ``INVALID_REQUEST`` with
+	Every key the ERP sends must be present (``SIGNATURE_META_FIELDS``, and in
+	``signature_appearance`` ``display``, ``outline`` and ``border``).  The values it always
+	sends are pinned: ``aligned`` 32768, ``sigflags`` 3, ``sigflagsft`` 132,
+	``sigandcertify`` False, ``auto_sigfield`` True, ``application`` "ERPNext".  Other
+	integers are exact ``int`` (never ``bool``) within fixed bounds (``sigpage`` 0..99999);
+	``sigbutton`` is an exact ``bool``; text is at most ``MAX_META_TEXT_CHARS`` and
+	readable (``_text``); ``sigfield`` has no '.'; ``signingdate`` is a PDF date;
+	``signaturebox`` four finite numbers; ``display`` (newlines allowed) has no character
+	whose UTF-16BE bytes include '(' ')' '\\' and none above U+FFFF; ``outline`` three ints
+	0..255; ``border`` 0..10.  ``signature_appearance.icon`` is dropped (see the module
+	docstring).  Anything else raises ``INVALID_REQUEST`` with
 	``SIGNATURE_META_UNSUPPORTED``, outside any ``except`` and naming nothing.
 	"""
 	clean = _checked_fields(meta, _META_CHECKS) if type(meta) is dict else _INVALID
@@ -585,8 +624,11 @@ class SignerService:
 				if body.get("pdf_sha256") != hashlib.sha256(pdf).hexdigest():
 					raise LocalSignerError("INVALID_PDF", "The PDF digest does not match the signing request.")
 				request = body.get("signing_request")
-				if not isinstance(request, dict) or not isinstance(request.get("signature_meta"), dict):
+				if not isinstance(request, dict) or "signature_meta" not in request:
 					raise LocalSignerError("INVALID_REQUEST", "A signing_request with signature_meta is required.")
+				if type(request["signature_meta"]) is not dict:
+					# The one message for every refused signature_meta (sanitise_signature_meta).
+					raise LocalSignerError("INVALID_REQUEST", SIGNATURE_META_UNSUPPORTED)
 				timestamp_url = request.get("timestamp_url")
 				if timestamp_url and timestamp_url not in service.config.allowed_timestamp_urls:
 					raise LocalSignerError("TSA_NOT_ALLOWED", "The ERP timestamp URL is not allowed by this workstation configuration.", status=409)

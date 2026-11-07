@@ -137,6 +137,10 @@ SIGNING_ERROR_CLASSES = frozenset(
 		"OSError",
 		"ValueError",
 		"KeyError",
+		# endesive's ``assert`` on an ``aligned`` too small for the signature; PyPDF2's
+		# ``getPage`` for a ``sigpage`` past the last page.
+		"AssertionError",
+		"IndexError",
 		"ReadTimeout",
 		"ConnectTimeout",
 		"ConnectionError",

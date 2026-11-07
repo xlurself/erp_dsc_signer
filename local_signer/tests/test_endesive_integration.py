@@ -8,16 +8,22 @@ library accepts were never exercised: the first real USB signing failed inside `
 as a cryptography object.  These tests run the real certificate parsing, the real issuer-chain
 builder, the real endesive and the real server-side verifier (``verify_usb_signed_pdf``).
 
-No USB token, no PKCS#11 driver, no network: ``timestamp_url`` is ``None`` throughout.
+No USB token, no PKCS#11 driver, no network: ``timestamp_url`` is ``None`` except in the
+TSA-refusal test, which replaces ``requests.post`` and uses an ``.invalid`` host.
 """
 
 import importlib
 import importlib.util
+import io
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from asn1crypto import cms as asn1_cms
+from asn1crypto import tsp as asn1_tsp
 from asn1crypto import x509 as asn1_x509
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -28,6 +34,8 @@ import test_token_login as fakes
 from test_token_login import PK, SENTINEL_PIN, FakeGuard, make_client
 
 from erp_dsc_local.certificates import build_issuer_chain
+from erp_dsc_local.errors import LocalSignerError, TokenSigningFailed
+from erp_dsc_local.service import SIGNATURE_META_UNSUPPORTED, sanitise_signature_meta
 from erp_dsc_local.token import _TokenHSM
 
 # The server-side verifier the ERP runs on the returned PDF.  Loaded by path so the Frappe
@@ -99,11 +107,11 @@ def _make_chain():
 	return leaf_key, leaf, intermediate, root
 
 
-def _minimal_pdf() -> bytes:
+def _minimal_pdf(catalog: bytes = b"<< /Type /Catalog /Pages 2 0 R >>") -> bytes:
 	"""A one-page PDF with a classic xref table (the shape wkhtmltopdf produces)."""
 	content = b"BT /F1 18 Tf 72 760 Td (F1 integration invoice) Tj ET"
 	objects = [
-		b"<< /Type /Catalog /Pages 2 0 R >>",
+		catalog,
 		b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
 		b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R "
 		b"/Resources << /Font << /F1 5 0 R >> >> >>",
@@ -175,7 +183,11 @@ def _der(certificate):
 	return certificate.public_bytes(serialization.Encoding.DER)
 
 
-class RealEndesiveSigningTests(unittest.TestCase):
+class RealEndesiveCase(unittest.TestCase):
+	"""The real endesive, a software key behind the fake PKCS#11 library.  No tests here."""
+
+	pk = PK  # the PyKCS11 stand-in the client uses
+
 	@classmethod
 	def setUpClass(cls):
 		cls.leaf_key, cls.leaf, cls.intermediate, cls.root = _make_chain()
@@ -207,21 +219,39 @@ class RealEndesiveSigningTests(unittest.TestCase):
 			{LEAF_KEY_HANDLE: self.leaf_key},
 		)
 		self.client = make_client(self.lib)
+		self.client.pk = self.pk
 		self.selected, self.certificates = self.client.select(
 			{"fingerprint_sha256": self.leaf.fingerprint(hashes.SHA256()).hex()}
 		)
+		self.stderr = io.StringIO()  # the one TOKEN_SIGNING_FAILED line
+		patcher = mock.patch("sys.stderr", self.stderr)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
-	def _sign(self, metadata):
+	def _sign(self, metadata, pdf=None, timestamp_url=None):
 		self.sign_log_start = len(self.lib.log)  # enumeration in setUp opened and closed sessions
 		return self.client.sign_pdf(
-			self.pdf,
+			self.pdf if pdf is None else pdf,
 			self.selected,
 			self.certificates,
 			metadata,
 			SENTINEL_PIN,
-			None,
+			timestamp_url,
 			login_guard=FakeGuard(self.lib.log),
 		)
+
+	def _failure(self, metadata, pdf=None, timestamp_url=None):
+		with self.assertRaises(TokenSigningFailed) as ctx:
+			self._sign(metadata, pdf, timestamp_url)
+		error = ctx.exception
+		self.assertIsNone(error.__cause__)
+		self.assertIsNone(error.__context__)
+		self.assertNotIn(SENTINEL_PIN, json.dumps(error.as_dict()) + self.stderr.getvalue())
+		return error
+
+	def _operations(self):
+		"""``login`` / ``sign`` / ``logout`` since ``_sign`` started, in order."""
+		return [entry[0] for entry in self.lib.log[self.sign_log_start :] if entry[0] in ("login", "sign", "logout")]
 
 	def _embedded_certificates(self, signed):
 		(byte_range,) = self.usb_signer._find_byte_ranges(signed)
@@ -237,6 +267,8 @@ class RealEndesiveSigningTests(unittest.TestCase):
 		self.assertEqual(verified["subject"], self.leaf.subject.rfc4514_string())
 		self.assertNotIn(SENTINEL_PIN.encode(), signed)
 
+
+class RealEndesiveSigningTests(RealEndesiveCase):
 	def test_hsm_certificate_is_der_bytes_that_asn1crypto_loads(self):
 		"""endesive loads the HSM certificate with asn1crypto from bytes (DER or PEM)."""
 		adapter = _TokenHSM(self.client, self.selected, None, FakeGuard(self.lib.log))
@@ -280,13 +312,62 @@ class RealEndesiveSigningTests(unittest.TestCase):
 			],
 		)
 
-	def test_unaligned_signature_signs_twice_with_one_login(self):
-		"""Without ``aligned`` endesive signs once to size the contents and again for real;
-		the adapter must reuse its one ``C_Login`` for the second ``C_Sign``."""
-		signed, metadata = self._sign({"sigflags": 3, "contact": "signer@example.invalid", "signingdate": "D:20261106120000+05'30'"})
+	def test_server_shaped_meta_with_aligned_zero_is_login_sign_sign_and_verifies(self):
+		"""``aligned`` 0: endesive signs once to size the contents and again for real; the
+		adapter reuses its one ``C_Login`` for the second ``C_Sign``.  The allowlist pins
+		``aligned`` to 32768, so this exercises the token layer directly."""
+		signed, metadata = self._sign(dict(_server_signature_meta(), aligned=0))
 		self._assert_verifies_on_server(signed, metadata)
 		self.assertEqual(self.lib.logins, [(2, SENTINEL_PIN)])
-		self.assertEqual([entry[0] for entry in self.lib.log[self.sign_log_start :]].count("sign"), 2)
+		self.assertEqual(["login", "sign", "sign", "logout"], self._operations())
+		self.assertEqual([PK.Mechanism(PK.CKM_SHA256_RSA_PKCS, None)] * 2, self.lib.mechanisms)
+
+	def test_the_three_key_partial_meta_is_refused_by_the_allowlist(self):
+		"""The partial meta the old unaligned test signed with no longer gets past the allowlist."""
+		partial = {"sigflags": 3, "contact": "signer@example.invalid", "signingdate": "D:20261106120000+05'30'"}
+		with self.assertRaises(LocalSignerError) as ctx:
+			sanitise_signature_meta(partial)
+		self.assertEqual(("INVALID_REQUEST", SIGNATURE_META_UNSUPPORTED), (ctx.exception.code, ctx.exception.message))
+		self.assertEqual(_server_signature_meta(), sanitise_signature_meta(_server_signature_meta()))
+
+	def test_a_sigpage_past_the_last_page_fails_in_cms_before_any_c_login(self):
+		error = self._failure(dict(_server_signature_meta(), sigpage=1))  # a one-page PDF
+		self.assertEqual({"stage": "cms", "error": "IndexError", "ckr": None}, error.details)
+		self.assertEqual([], self.lib.logins)
+		self.assertEqual([], self._operations())
+
+	def test_an_aligned_too_small_for_the_signature_fails_in_cms_after_c_sign(self):
+		error = self._failure(dict(_server_signature_meta(), aligned=16))
+		self.assertEqual({"stage": "cms", "error": "AssertionError", "ckr": None}, error.details)
+		self.assertEqual(["login", "sign", "logout"], self._operations())
+
+	def test_a_tsa_that_answers_but_refuses_is_stage_tsa(self):
+		"""requests does not raise on a 4xx/5xx and endesive raises a plain ValueError for a
+		reply that is not a granted timestamp (signer.py ~145), and asn1crypto raises one for
+		a status-only rejection, after the final C_Sign.  ``requests.post`` is replaced: no
+		network."""
+		# TimeStampResp { status PKIStatusInfo { status rejection(2) } }, no token: what a
+		# refusing TSA sends.
+		rejection = bytes.fromhex("30053003020102")
+		with self.assertRaises(ValueError):
+			asn1_tsp.TimeStampResp.load(rejection)["status"]
+		replies = {
+			"http-503": SimpleNamespace(status_code=503, headers={"Content-Type": "text/html"}, content=b"pin=" + SENTINEL_PIN.encode()),
+			"rejection": SimpleNamespace(status_code=200, headers={"Content-Type": "application/timestamp-reply"}, content=rejection),
+		}
+		for label, reply in replies.items():
+			with self.subTest(reply=label):
+				posts = []
+
+				def post(url, *args, reply=reply, **kwargs):
+					posts.append((url, kwargs.get("timeout")))
+					return reply
+
+				with mock.patch("requests.post", post):
+					error = self._failure(_server_signature_meta(), timestamp_url="https://tsa.invalid/")
+				self.assertEqual({"stage": "tsa", "error": "ValueError", "ckr": None}, error.details)
+				self.assertEqual([("https://tsa.invalid/", (5, 15))], posts)
+				self.assertEqual(["login", "sign", "logout"], self._operations())
 
 
 if __name__ == "__main__":

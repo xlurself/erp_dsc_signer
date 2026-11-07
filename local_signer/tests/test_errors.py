@@ -51,6 +51,8 @@ SPEC_ERRORS = {
 	"OSError",
 	"ValueError",
 	"KeyError",
+	"AssertionError",
+	"IndexError",
 	"ReadTimeout",
 	"ConnectTimeout",
 	"ConnectionError",

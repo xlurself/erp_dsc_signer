@@ -27,6 +27,7 @@ from erp_dsc_local.errors import PinCancelled, PinIncorrect, PinLocked, PinRateL
 from erp_dsc_local.service import MAX_PIN_FAILURES, SignerService
 from erp_dsc_local.trust import TrustStore
 from erp_dsc_local.ui import DialogHost
+from test_signature_meta import server_meta  # the full meta the ERP sends
 
 STUB = Path(__file__).resolve().parent / "_stub_child.py"
 SERIAL = "SER-2"  # two_slot_lib's signing token, normalised
@@ -173,7 +174,7 @@ class RaceCase(unittest.TestCase):
 
 	def sign(self):
 		return self.service.sign(
-			ORIGIN, b"%PDF", {"reason": "x"}, document_name="INV-1", selector=None, provider="auto", module_id=None, timestamp_url=None
+			ORIGIN, b"%PDF", server_meta(), document_name="INV-1", selector=None, provider="auto", module_id=None, timestamp_url=None
 		)
 
 	def start(self, name):

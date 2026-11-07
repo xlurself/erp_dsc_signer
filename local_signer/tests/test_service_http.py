@@ -27,6 +27,7 @@ from erp_dsc_local.pin import request_pin
 from erp_dsc_local.service import SignerService
 from erp_dsc_local.trust import TrustStore
 from erp_dsc_local.ui import DialogHost
+from test_signature_meta import server_meta, server_meta_with_icon
 
 
 STUB = Path(__file__).resolve().parent / "_stub_child.py"
@@ -179,7 +180,7 @@ class ServiceTestCase(unittest.TestCase):
 			"nonce": issued["nonce"],
 			"pdf_base64": base64.b64encode(PDF).decode("ascii"),
 			"pdf_sha256": hashlib.sha256(PDF).hexdigest(),
-			"signing_request": {"signature_meta": {"reason": "test"}, "document_name": document_name},
+			"signing_request": {"signature_meta": server_meta(), "document_name": document_name},
 			"certificate": {"fingerprint_sha256": "ab" * 32},
 		}
 		body.update(extra)
@@ -433,13 +434,40 @@ class TestSign(SignTestCase):
 
 	def test_the_server_icon_is_dropped_and_the_rest_reaches_sign_pdf(self):
 		self.use_real_dialogs()
-		appearance = {"display": "Digitally signed by USB DSC signer", "outline": [0, 0, 0], "border": 0}
-		meta = {"reason": "Digitally signed invoice", "signature_appearance": dict(appearance, icon="/srv/sig.png")}
+		meta = server_meta_with_icon("/srv/sig.png")
 		status, _headers, body = self.sign_request(
 			f"MODE:ok_entered:{DIALOG_PIN}", signing_request={"signature_meta": meta, "document_name": f"MODE:ok_entered:{DIALOG_PIN}"}
 		)
 		self.assertEqual(200, status, body)
-		self.assertEqual([{"reason": "Digitally signed invoice", "signature_appearance": appearance}], self.token.metadatas)
+		self.assertEqual([server_meta()], self.token.metadatas)
+
+	def test_an_incomplete_or_non_dict_signature_meta_is_refused_with_the_one_message(self):
+		"""Before any token read or dialog, with the same fixed message as every other refused
+		meta: no key set short of the server's, no value other than a JSON object."""
+		cases = (
+			{},
+			{"reason": "test"},
+			{"sigflags": 3, "contact": "signer@example.invalid", "signingdate": "D:20261106120000+05'30'"},
+			dict(server_meta(), sigandcertify=True),
+			dict(server_meta(), aligned=0),
+			[],
+			[["reason", "test"]],
+			"reason=test",
+			5,
+			True,
+			None,
+		)
+		for meta in cases:
+			with self.subTest(meta=meta):
+				status, headers, body = self.sign_request("INV-1", signing_request={"signature_meta": meta, "document_name": "INV-1"})
+				self.assertEqual(400, status)
+				self.assertEqual(ERP, headers.get("Access-Control-Allow-Origin"))
+				self.assertEqual({"code": "INVALID_REQUEST", "message": UNSUPPORTED_META}, body["error"])
+		status, _headers, body = self.sign_request("INV-1", signing_request={"document_name": "INV-1"})
+		self.assertEqual((400, "INVALID_REQUEST"), (status, body["error"]["code"]))
+		self.assertEqual("A signing_request with signature_meta is required.", body["error"]["message"])
+		self.assertEqual([], self.events, "the token must not be touched")
+		self.assertEqual([], self.pin_calls, "no PIN may be asked for")
 
 	def test_concurrent_pin_prompt_is_dialog_busy_429(self):
 		self.use_real_dialogs()
