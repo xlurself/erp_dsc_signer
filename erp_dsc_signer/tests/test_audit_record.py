@@ -82,7 +82,7 @@ class TestCompleteUsbSigningAudit(unittest.TestCase):
 
 	USER = "signer@example.com"
 
-	def _drive(self, leak_into=None, verify_error=None):
+	def _drive(self, leak_into=None, verify_error=None, certificate_metadata=None):
 		doc = _Doc()
 		doc.docstatus = 1
 		payload = {"invoice": doc.name, "replace": 0, "pdf_base64": "JVBERi0="}
@@ -109,7 +109,12 @@ class TestCompleteUsbSigningAudit(unittest.TestCase):
 				pfr.db.set_value.side_effect = lambda *a, **k: pfr.log_error(f"pin={SENTINEL}")
 			try:
 				result = signing.complete_usb_signing(
-					"sess", "nonce", "b64", certificate_metadata={"pin": SENTINEL, "subject": "CN=Test Signer"}
+					"sess",
+					"nonce",
+					"b64",
+					certificate_metadata=certificate_metadata
+					if certificate_metadata is not None
+					else {"pin": SENTINEL, "subject": "CN=Test Signer"},
 				)
 				error = None
 			except RuntimeError as exc:
@@ -127,6 +132,21 @@ class TestCompleteUsbSigningAudit(unittest.TestCase):
 				pfr.msgprint.call_args_list,
 			]
 		)
+
+	def test_browser_sends_certificate_metadata_as_a_json_string(self):
+		# frappe.call JSON-encodes nested objects, so the server receives a str, not a dict.
+		import json
+
+		_r, error, _sfr, _pfr, verify = self._drive(certificate_metadata=json.dumps({"subject": "CN=Test Signer"}))
+		self.assertIsNone(error)
+		self.assertEqual({"subject": "CN=Test Signer"}, verify.call_args.args[2])
+
+	def test_garbage_certificate_metadata_is_rejected(self):
+		for bad in ("not json", "[1, 2]", "12"):
+			with self.subTest(bad=bad):
+				_r, error, _sfr, _pfr, verify = self._drive(certificate_metadata=bad)
+				self.assertIsNotNone(error)
+				verify.assert_not_called()
 
 	def test_records_user_time_and_invoice_name(self):
 		result, error, _sfr, pfr, _v = self._drive()

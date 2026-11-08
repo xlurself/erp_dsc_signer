@@ -113,13 +113,27 @@ def complete_usb_signing(session_id, nonce, signed_pdf_base64, certificate_metad
 	try:
 		original_pdf = base64.b64decode(payload["pdf_base64"], validate=True)
 		signed_pdf = decode_signed_pdf_payload(signed_pdf_base64, original_pdf)
-		metadata = verify_usb_signed_pdf(original_pdf, signed_pdf, certificate_metadata or {})
+		metadata = verify_usb_signed_pdf(original_pdf, signed_pdf, _certificate_metadata_arg(certificate_metadata))
 	except USBSignatureError as exc:
 		frappe.log_error(title="USB DSC signature rejected", message=str(exc))
 		frappe.throw(_(str(exc)))
 	result = attach_signed_invoice_pdf(doc, signed_pdf, payload["replace"], frappe.session.user)
 	result["certificate"] = metadata
 	return result
+
+
+def _certificate_metadata_arg(value):
+	"""frappe.call JSON-encodes nested objects, so the browser's certificate details arrive as a str."""
+	if value is None or value == "":
+		return {}
+	if isinstance(value, str):
+		try:
+			value = json.loads(value)
+		except ValueError:
+			raise USBSignatureError("Certificate metadata must be a JSON object.") from None
+	if not isinstance(value, dict):
+		raise USBSignatureError("Certificate metadata must be a JSON object.")
+	return value
 
 
 def _invoice_for_signing(name, replace):
