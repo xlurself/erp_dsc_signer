@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -77,6 +78,9 @@ def parse_token_certificate(
 		"slot_id": slot_id,
 		"token_label": token_label,
 		"token_serial": token_serial,
+		# PUBLIC certificate bytes only: the ERP authenticates them against the CCA India hierarchy
+		# before the PIN is ever requested. Never key material.
+		"der_base64": base64.b64encode(der).decode("ascii"),
 	}
 	return TokenCertificate(
 		der, key_id, label, slot_id, token_label, token_serial, metadata, certificate

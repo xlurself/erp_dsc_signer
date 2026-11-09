@@ -230,6 +230,7 @@ fixtures = [
 					"Sales Invoice-custom_signed_invoice_pdf",
 					"Sales Invoice-custom_signed_on",
 					"Sales Invoice-custom_signed_by",
+					"Sales Invoice-custom_signature_verification",
 				],
 			]
 		],

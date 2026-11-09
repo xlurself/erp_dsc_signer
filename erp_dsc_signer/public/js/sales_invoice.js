@@ -4,6 +4,8 @@
 frappe.ui.form.on("Sales Invoice", {
 	refresh(frm) {
 		if (frm.is_new() || frm.doc.docstatus !== 1) return;
+		const status = signature_status_label(frm.doc);
+		if (status) frm.dashboard.add_indicator(frappe.utils.escape_html(status.label), status.color);
 		const label = frm.doc.custom_digitally_signed ? __("Re-sign Digitally") : __("Sign Digitally");
 		frm.add_custom_button(label, () => choose_signing_method(frm, frm.doc.custom_digitally_signed ? 1 : 0), __("Actions"));
 		if (frm.doc.custom_digitally_signed && frm.doc.custom_signed_invoice_pdf) {
@@ -13,6 +15,21 @@ frappe.ui.form.on("Sales Invoice", {
 		}
 	},
 });
+
+// "Verified" only when the server-written record says verified === true (a boolean, not "true" or 1).
+function signature_status_label(doc) {
+	let record = null;
+	try {
+		record = JSON.parse(doc.custom_signature_verification || "null");
+	} catch (_error) {
+		record = null;
+	}
+	if (record && typeof record === "object" && record.verified === true) {
+		return {label: __("Verified (CCA India chain, revocation checked)"), color: "green"};
+	}
+	if (doc.custom_digitally_signed) return {label: __("Signature valid"), color: "blue"};
+	return null;
+}
 
 function choose_signing_method(frm, replace) {
 	frappe.call({
@@ -59,7 +76,19 @@ async function sign_with_usb(frm, replace, provider, base_url) {
 		// trusted never leaves a half-built signing session behind.
 		await ensure_paired(base_url);
 		const prepared = await frappe_request("erp_dsc_signer.api.signing.prepare_usb_signing", {name: frm.doc.name, replace, provider});
-		const certificate = await select_local_certificate(base_url, provider);
+		const selected = await select_local_certificate(base_url, provider);
+		const certificate = {fingerprint_sha256: selected.fingerprint_sha256};
+		// F2: authenticate the certificate against the CCA India hierarchy BEFORE any PIN is requested.
+		// A refusal rejects frappe_request and lands in the outer catch: nothing below runs.
+		const authenticated = await frappe_request("erp_dsc_signer.api.signing.authenticate_usb_certificate", {
+			session_id: prepared.session_id,
+			certificate_der_base64: selected.der_base64,
+		});
+		// The server must have authenticated THE certificate the token will sign with; otherwise stop
+		// before the token is ever asked for a nonce, a PIN or a signature.
+		if (!authenticated || authenticated.verified !== true || authenticated.certificate_sha256 !== selected.fingerprint_sha256) {
+			throw new Error(__("The authenticated certificate is not the selected DSC certificate, so the document was not signed."));
+		}
 		const sign_nonce = await local_request(base_url, "/v1/nonce", "POST", {purpose: "sign"});
 		frappe.dom.freeze(__("Click the signer window, then type your PIN"));
 		const signed = await local_request(base_url, "/v1/sign", "POST", {
@@ -70,12 +99,16 @@ async function sign_with_usb(frm, replace, provider, base_url) {
 			pdf_sha256: prepared.pdf_sha256,
 			signing_request: prepared.signing_request,
 		});
-		await frappe_request("erp_dsc_signer.api.signing.complete_usb_signing", {
+		const completed = await frappe_request("erp_dsc_signer.api.signing.complete_usb_signing", {
 			session_id: prepared.session_id,
 			nonce: prepared.nonce,
 			signed_pdf_base64: signed.signed_pdf_base64,
 			certificate_metadata: signed.certificate_metadata,
 		});
+		// Only the server's record may say "verified" (CCA India chain, revocation checked).
+		if (completed && completed.verification && completed.verification.verified === true) {
+			frappe.show_alert({message: __("Signed and verified (CCA India chain, revocation checked)"), indicator: "green"});
+		}
 		frm.reload_doc();
 	} catch (error) {
 		frappe.msgprint({title: __("USB DSC Signing"), indicator: "red", message: frappe.utils.escape_html(error.message || __("Signing could not be completed."))});
@@ -89,13 +122,13 @@ async function select_local_certificate(base_url, provider) {
 	const result = await local_request(base_url, "/v1/certificates", "POST", {nonce: nonce.nonce, provider});
 	const certificates = result.certificates || [];
 	if (!certificates.length) throw new Error(__("No signing certificate is available on the connected token."));
-	if (certificates.length === 1) return {fingerprint_sha256: certificates[0].fingerprint_sha256};
+	if (certificates.length === 1) return {fingerprint_sha256: certificates[0].fingerprint_sha256, der_base64: certificates[0].der_base64};
 	return new Promise((resolve, reject) => {
 		const dialog = new frappe.ui.Dialog({
 			title: __("Select DSC Certificate"),
 			fields: [{fieldname: "fingerprint", label: __("Certificate"), fieldtype: "Select", options: certificates.map((cert) => `${cert.fingerprint_sha256}\t${cert.common_name || cert.subject}`).join("\n")}],
 			primary_action_label: __("Use Certificate"),
-			primary_action(values) { dialog.hide(); resolve({fingerprint_sha256: values.fingerprint.split("\t")[0]}); },
+			primary_action(values) { dialog.hide(); const fingerprint = values.fingerprint.split("\t")[0]; const chosen = certificates.find((cert) => cert.fingerprint_sha256 === fingerprint); resolve({fingerprint_sha256: fingerprint, der_base64: chosen && chosen.der_base64}); },
 		});
 		dialog.$wrapper.on("hidden.bs.modal", () => reject(new Error(__("Certificate selection was cancelled."))));
 		dialog.show();

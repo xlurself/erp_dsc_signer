@@ -3,7 +3,9 @@
 Pure unittest + unittest.mock; never touches a real site or database.
 """
 
+import base64
 import datetime
+import hashlib
 import unittest
 from unittest import mock
 
@@ -13,6 +15,17 @@ from erp_dsc_signer.utils.usb_signer import USBSignatureError
 
 SENTINEL = "S3NT1NEL-PIN-9981"
 MOMENT = datetime.datetime(2026, 1, 2, 3, 4, 5, 6)
+CERT_DER = b"stand-in DER certificate"
+CERT_SHA256 = hashlib.sha256(CERT_DER).hexdigest()
+VERIFIED_RECORD = {
+	"verified": True,
+	"checked_at": "2026-01-02T03:04:05+00:00",
+	"chain": [{"subject_cn": "Test Signer", "sha256": CERT_SHA256}],
+	"root_sha256": "0" * 64,
+	"revocation": [],
+	"timestamp": "none",
+	"signing_time_basis": "server clock at verification",
+}
 
 
 class _Doc(dict):
@@ -85,12 +98,23 @@ class TestCompleteUsbSigningAudit(unittest.TestCase):
 	def _drive(self, leak_into=None, verify_error=None, certificate_metadata=None):
 		doc = _Doc()
 		doc.docstatus = 1
-		payload = {"invoice": doc.name, "replace": 0, "pdf_base64": "JVBERi0="}
+		# F2: complete_usb_signing only accepts a session that authenticate_usb_certificate marked
+		# (tests/test_signing_authenticate.py covers that gate); ca_trust is stubbed below.
+		payload = {
+			"invoice": doc.name,
+			"replace": 0,
+			"pdf_base64": "JVBERi0=",
+			"authenticated": True,
+			"certificate_sha256": CERT_SHA256,
+			"certificate_der_base64": base64.b64encode(CERT_DER).decode("ascii"),
+		}
 		file_doc = mock.MagicMock()
 		file_doc.file_url = "/private/files/SINV-0001-signed.pdf"
 		file_doc.file_name = "SINV-0001-signed.pdf"
-		metadata = {"subject": "CN=Test Signer", "serial": "01"}
-		with mock.patch.object(signing, "frappe") as sfr, mock.patch.object(
+		metadata = {"subject": "CN=Test Signer", "serial": "01", "fingerprint_sha256": CERT_SHA256}
+		with mock.patch.object(
+			signing.ca_trust, "authenticate_certificate", return_value=VERIFIED_RECORD
+		), mock.patch.object(signing, "frappe") as sfr, mock.patch.object(
 			pdf_signer, "frappe"
 		) as pfr, mock.patch.object(signing, "_consume_session", return_value=payload), mock.patch.object(
 			signing, "_invoice_for_signing", return_value=doc
@@ -156,7 +180,9 @@ class TestCompleteUsbSigningAudit(unittest.TestCase):
 		self.assertEqual(self.USER, args.args[2]["custom_signed_by"])
 		self.assertEqual(MOMENT, args.args[2]["custom_signed_on"])
 		self.assertEqual("SINV-0001", pfr.get_doc.call_args.args[0]["attached_to_name"])
-		self.assertEqual({"subject": "CN=Test Signer", "serial": "01"}, result["certificate"])
+		self.assertEqual(
+			{"subject": "CN=Test Signer", "serial": "01", "fingerprint_sha256": CERT_SHA256}, result["certificate"]
+		)
 
 	def test_pin_sentinel_in_request_args_never_reaches_any_sink(self):
 		result, error, sfr, pfr, verify = self._drive()

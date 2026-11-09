@@ -174,10 +174,13 @@ def get_signature_box(settings) -> tuple[int, int, int, int]:
 	)
 
 
-def sign_pdf_bytes(pdf_bytes: bytes, settings) -> bytes:
-	pfx_bytes = get_pfx_bytes(settings)
-	pfx_password = settings.get_password("pfx_password", raise_exception=False) or ""
-	key, cert, othercerts = load_pfx_credentials(pfx_bytes, pfx_password)
+def sign_pdf_bytes(pdf_bytes: bytes, settings, credentials=None) -> bytes:
+	# credentials: (key, cert, othercerts) already loaded by the caller, so the certificate it authenticated
+	# is the one that signs (api/signing.py sign_with_pfx). Without them the PFX is loaded here as before.
+	if credentials is None:
+		pfx_password = settings.get_password("pfx_password", raise_exception=False) or ""
+		credentials = load_pfx_credentials(get_pfx_bytes(settings), pfx_password)
+	key, cert, othercerts = credentials
 
 	now = frappe.utils.now_datetime().astimezone()
 	tz_offset = _format_tz_offset(now)

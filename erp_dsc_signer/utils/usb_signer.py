@@ -10,8 +10,10 @@ import re
 from datetime import datetime, timezone
 
 from asn1crypto import cms as asn1_cms
+from asn1crypto import x509 as asn1_x509
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509.oid import ExtensionOID
 from endesive.pdf import verify as verify_pdf_signatures
 
@@ -164,11 +166,17 @@ def _extract_signer_certificate(pdf_bytes, byte_range):
 
 	signer_certificate = None
 	if sid.name == "issuer_and_serial_number":
+		# Issuer AND serial must both match, and match exactly ONE distinct certificate: a serial is unique
+		# only per issuer, so a serial-only match could pick a decoy certificate embedded first.
 		serial_number = sid.chosen["serial_number"].native
-		signer_certificate = next(
-			(certificate for certificate in certificates if certificate.serial_number == serial_number),
-			None,
-		)
+		issuer_der = sid.chosen["issuer"].dump()
+		matches = {
+			certificate.fingerprint(hashes.SHA256()): certificate
+			for certificate in certificates
+			if certificate.serial_number == serial_number and _issuer_der(certificate) == issuer_der
+		}
+		if len(matches) == 1:
+			signer_certificate = next(iter(matches.values()))
 	elif sid.name == "subject_key_identifier":
 		key_identifier = sid.chosen.native
 		for certificate in certificates:
@@ -184,6 +192,14 @@ def _extract_signer_certificate(pdf_bytes, byte_range):
 	if signer_certificate is None:
 		raise USBSignatureError("The CMS signer identifier does not match an embedded certificate.")
 	return signer_certificate, digest_algorithm
+
+
+def _issuer_der(certificate):
+	"""The issuer Name exactly as encoded in the certificate (no re-encoding, no normalisation)."""
+	try:
+		return asn1_x509.Certificate.load(certificate.public_bytes(Encoding.DER))["tbs_certificate"]["issuer"].dump()
+	except Exception:
+		return None
 
 
 def _validate_certificate(certificate):
