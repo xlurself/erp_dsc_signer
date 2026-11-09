@@ -763,6 +763,76 @@ class TestSignerCertificateSelection(unittest.TestCase):
 		self.assertEqual(_sha(self.signer), _sha(self.select([self.signer, self.signer])))
 
 
+def _ski_cert(cn, key, serial, ski_digest):
+	now = datetime.datetime.now(datetime.timezone.utc)
+	name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+	return (
+		x509.CertificateBuilder()
+		.subject_name(name)
+		.issuer_name(name)
+		.public_key(key.public_key())
+		.serial_number(serial)
+		.not_valid_before(now - datetime.timedelta(days=1))
+		.not_valid_after(now + datetime.timedelta(days=30))
+		.add_extension(x509.SubjectKeyIdentifier(ski_digest), critical=False)
+		.sign(key, hashes.SHA256())
+	)
+
+
+def _cms_contents_ski(ski_digest, certificates):
+	"""Like _cms_contents, but the signer is named by subjectKeyIdentifier."""
+	signer_info = asn1_cms.SignerInfo(
+		{
+			"version": "v3",
+			"sid": asn1_cms.SignerIdentifier(name="subject_key_identifier", value=ski_digest),
+			"digest_algorithm": {"algorithm": "sha256"},
+			"signature_algorithm": {"algorithm": "rsassa_pkcs1v15"},
+			"signature": b"\x00" * 8,
+		}
+	)
+	signed_data = asn1_cms.SignedData(
+		{
+			"version": "v3",
+			"digest_algorithms": [{"algorithm": "sha256"}],
+			"encap_content_info": {"content_type": "data"},
+			"certificates": [
+				asn1_cms.CertificateChoices(name="certificate", value=asn1_x509.Certificate.load(_der(c)))
+				for c in certificates
+			],
+			"signer_infos": [signer_info],
+		}
+	)
+	content = asn1_cms.ContentInfo({"content_type": "signed_data", "content": signed_data}).dump()
+	buffer = b"<" + content.hex().encode("ascii") + b">"
+	return buffer, (0, 0, len(buffer), 0)
+
+
+class TestSignerCertificateSelectionBySki(unittest.TestCase):
+	"""Cursor L2: a subjectKeyIdentifier sid must also name exactly ONE distinct embedded certificate."""
+
+	SKI = b"\x11" * 20
+
+	@classmethod
+	def setUpClass(cls):
+		key_a, key_b = _key(), _key()
+		cls.real = _ski_cert("Real Signer", key_a, 0x01, cls.SKI)
+		cls.decoy = _ski_cert("Decoy", key_b, 0x02, cls.SKI)
+
+	def select(self, certificates):
+		buffer, byte_range = _cms_contents_ski(self.SKI, certificates)
+		return usb_signer._extract_signer_certificate(buffer, byte_range)[0]
+
+	def test_one_match_is_the_signer(self):
+		self.assertEqual(_sha(self.real), _sha(self.select([self.real])))
+
+	def test_two_different_certificates_with_the_same_ski_are_refused(self):
+		with self.assertRaises(USBSignatureError):
+			self.select([self.decoy, self.real])
+
+	def test_the_same_certificate_embedded_twice_is_still_one_signer(self):
+		self.assertEqual(_sha(self.real), _sha(self.select([self.real, self.real])))
+
+
 class TestPfxGate(_Base):
 	def test_failing_pfx_certificate_is_never_used_to_sign(self):
 		for code in ("NOT_CCA_TRUSTED", "REVOKED", "REVOCATION_UNAVAILABLE"):

@@ -601,6 +601,16 @@ class OCSPTest(_Base):
 		self.assertRefused("REVOKED", leaf, net)
 		self.assertNotIn(MAIN.u["leaf_crl"], net.urls())  # a revoked answer is final, no downgrade
 
+	def test_stale_revoked_ocsp_is_still_final_even_when_the_crl_says_good(self):
+		# Cursor L1: a correctly signed "revoked" answer refuses even when its nextUpdate is past.
+		leaf = MAIN.leaf()
+		net = world(MAIN, leaf)  # the CRL (default) lists nothing: good
+		net.routes[MAIN.u["leaf_ocsp"]] = ocsp_bytes(
+			leaf, MAIN.sub, MAIN.sub_key, status="revoked", this_update=NOW - 3 * DAY, next_update=NOW - DAY
+		)
+		self.assertRefused("REVOKED", leaf, net)
+		self.assertNotIn(MAIN.u["leaf_crl"], net.urls())
+
 	def test_revoked_intermediate_via_ocsp(self):
 		leaf = MAIN.leaf()
 		net = world(MAIN, leaf)

@@ -13,6 +13,8 @@ dependencies = [
     "pypdf>=3.0.0",
     # endesive's vendored PyPDF2_annotate imports attr without declaring it.
     "attrs>=22.0.0",
+    # F2: ca_trust uses cryptography.x509.verification (PolicyBuilder/Store) and x509.ocsp.
+    "cryptography>=42.0.0",
 ]
 
 [build-system]

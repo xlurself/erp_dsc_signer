@@ -179,6 +179,7 @@ def _extract_signer_certificate(pdf_bytes, byte_range):
 			signer_certificate = next(iter(matches.values()))
 	elif sid.name == "subject_key_identifier":
 		key_identifier = sid.chosen.native
+		matches = {}
 		for certificate in certificates:
 			try:
 				digest = certificate.extensions.get_extension_for_oid(
@@ -187,8 +188,10 @@ def _extract_signer_certificate(pdf_bytes, byte_range):
 			except x509.ExtensionNotFound:
 				continue
 			if digest == key_identifier:
-				signer_certificate = certificate
-				break
+				matches[certificate.fingerprint(hashes.SHA256())] = certificate
+		# Exactly ONE distinct certificate, as for issuer+serial: never "first match wins".
+		if len(matches) == 1:
+			signer_certificate = next(iter(matches.values()))
 	if signer_certificate is None:
 		raise USBSignatureError("The CMS signer identifier does not match an embedded certificate.")
 	return signer_certificate, digest_algorithm
