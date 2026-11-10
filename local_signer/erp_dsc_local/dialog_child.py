@@ -89,9 +89,33 @@ EXIT_PARENT_GONE = 75
 EXIT_NOT_ISOLATED = 78
 
 # --- Presentation -----------------------------------------------------------------
+# Frappe v14 desk look (visual only: no behaviour depends on any value below).  The
+# body text uses the first UI_FONT_FAMILIES entry Tk knows; Tk always knows Helvetica.
+UI_FONT_FAMILIES = ("Inter", "Helvetica Neue", "Helvetica")
+DIALOG_MIN_WIDTH = 460  # pixels; the window grows past it for a long host, never shrinks below
+WINDOW_PADDING = 24
+COLOR_BG = "#ffffff"
+COLOR_TEXT = "#1f272e"
+COLOR_MUTED = "#6c7680"
+COLOR_BORDER = "#d1d8dd"
+COLOR_FIELD_WAIT = "#f4f5f6"  # the PIN box before the accepted click
+COLOR_FIELD_ACTIVE = "#ffffff"
+COLOR_FOCUS_HALO = "#c8e2fb"  # around the active PIN box
+COLOR_PRIMARY = "#2490ef"
+COLOR_PRIMARY_PRESSED = "#1579d0"
+COLOR_PRIMARY_DISABLED = "#a8d3fa"
+COLOR_PRIMARY_DISABLED_TEXT = "#eef6fe"
+COLOR_PRIMARY_TEXT = "#ffffff"
+COLOR_SECONDARY = "#f4f5f6"
+COLOR_SECONDARY_PRESSED = "#e2e6e9"
+COLOR_BUTTON_FOCUS = "#1f272e"  # keyboard focus ring on a flat button
+COLOR_WARNING = "#a40000"
+PIN_ENTRY_WIDTH = 30  # characters
+PIN_ENTRY_FONT_SIZE = 14
+PIN_PLACEHOLDER = "Click here to start typing"  # its own Label drawn over the Entry, never inserted into it
 # Only the signer's own text (heading, warnings, footer) is wrapped.  The origin's host
 # line and every site claim are NEVER wrapped (spec section 9).
-WRAP_PIXELS = 520
+WRAP_PIXELS = DIALOG_MIN_WIDTH - 2 * WINDOW_PADDING
 ORIGIN_FONT_FAMILY = "Courier"
 ORIGIN_FONT_SIZES = (14, 13, 12, 11, 10, 9, 8)  # largest first; shrink only to fit the screen
 ORIGIN_SCREEN_MARGIN = 80  # pixels left free beside the host line
@@ -492,10 +516,97 @@ class _InputGuard:
 def _prepare_window(window, title: str) -> None:
 	window.title(title)
 	window.resizable(False, False)
+	window.configure(bg=COLOR_BG)
+	window.minsize(DIALOG_MIN_WIDTH, 1)
 	window.attributes("-topmost", True)
 	window.lift()
 	# Deliberately no focus_force(): stealing focus while the user is typing in
 	# another window would swallow keystrokes (spec section 9, click-first).
+
+
+def _ui_family(window) -> str:
+	"""The first UI_FONT_FAMILIES entry this Tk knows (Tk always maps the last, Helvetica)."""
+	import tkinter.font as tkfont
+
+	known = set(tkfont.families(window))
+	for family in UI_FONT_FAMILIES:
+		if family in known:
+			return family
+	return UI_FONT_FAMILIES[-1]
+
+
+def _flat_button_class(tk):
+	"""A flat, Frappe-coloured button drawn as a tk.Label (macOS Tk ignores tk.Button colours).
+
+	It keeps the parts of the tk.Button contract the PIN window relies on:
+	``invoke()`` runs the command only while the state is "normal", so a disabled
+	button is inert to the mouse, to Space and to ``invoke()``; a mouse press that
+	starts on the ENABLED button and is released inside it invokes it (as tk.Button
+	does, a press that began while it was disabled never does); Space invokes it when
+	it has keyboard focus (``takefocus``: Tab reaches it); Return does not.
+	``set_state()`` changes the state and the colours together.  The 1-pixel outline
+	(and the keyboard-focus ring) is ``outline``, a Frame around the Label: macOS Tk
+	does not draw the highlight ring of a Label nested in a Frame.  Pack ``outline``.
+	"""
+
+	class FlatButton(tk.Label):
+		def __init__(self, master, *, text, command, primary=False, font=None):
+			self.outline = tk.Frame(master, padx=1, pady=1)
+			super().__init__(self.outline, text=text, font=font, padx=20, pady=7, takefocus=1, cursor="hand2", highlightthickness=0)
+			self.pack(fill="both", expand=True)
+			self._on_activate = command
+			self._primary = primary
+			self._pressed = False
+			self._focused = False
+			self.set_state("normal")
+			self.bind("<ButtonPress-1>", self._on_press)
+			self.bind("<ButtonRelease-1>", self._on_release)
+			self.bind("<KeyPress-space>", lambda _event: self.invoke())
+			# Colour only; no "break", so the window's own FocusIn/FocusOut (the input
+			# guard) still sees every event.
+			self.bind("<FocusIn>", lambda _event: self._set_focused(True))
+			self.bind("<FocusOut>", lambda _event: self._set_focused(False))
+
+		def _enabled(self) -> bool:
+			return str(self.cget("state")) != "disabled"
+
+		def _set_focused(self, focused: bool) -> None:
+			self._focused = focused
+			self._paint()
+
+		def _paint(self, background=None) -> None:
+			if not self._primary:
+				bg, fg, border = COLOR_SECONDARY, COLOR_TEXT, COLOR_BORDER
+			elif self._enabled():
+				bg, fg, border = COLOR_PRIMARY, COLOR_PRIMARY_TEXT, COLOR_PRIMARY
+			else:
+				bg, fg, border = COLOR_PRIMARY_DISABLED, COLOR_PRIMARY_DISABLED_TEXT, COLOR_PRIMARY_DISABLED
+			self.configure(bg=background or bg, fg=fg, disabledforeground=fg, activebackground=bg, activeforeground=fg)
+			self.outline.configure(bg=COLOR_BUTTON_FOCUS if self._focused else border)
+
+		def set_state(self, state: str) -> None:
+			self.configure(state=state)
+			self._paint()
+
+		def invoke(self):
+			if not self._enabled():
+				return None
+			return self._on_activate()
+
+		def _on_press(self, _event) -> None:
+			self._pressed = self._enabled()
+			if self._pressed:
+				self._paint(COLOR_PRIMARY_PRESSED if self._primary else COLOR_SECONDARY_PRESSED)
+
+		def _on_release(self, event) -> None:
+			pressed, self._pressed = self._pressed, False
+			if not pressed:
+				return
+			self._paint()
+			if 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height():
+				self.invoke()
+
+	return FlatButton
 
 
 def _origin_font(window, origin: str):
@@ -525,13 +636,14 @@ def _claim_font(origin_font: tuple) -> tuple:
 	return (CLAIM_FONT_FAMILY, min(CLAIM_FONT_SIZE, origin_font[1]))
 
 
-def _add_text_block(tk, body, request: dict, heading: str, origin_font: tuple, extra_warnings=()) -> None:
+def _add_text_block(tk, body, request: dict, heading: str, origin_font: tuple, extra_warnings=(), ui="Helvetica") -> None:
 	"""Origin first in its own label, then the heading, warnings and site claims.
 
 	The origin label and the claim labels have NO wraplength (Tk then never wraps).
 	`origin_font` comes from _origin_font, so the host line fits on the screen.  Each
 	claim is one line that starts with CLAIM_PREFIX, so site text can never begin a
-	line of its own, and is drawn no larger than the origin (_claim_font).
+	line of its own, and is drawn no larger than the origin (_claim_font).  `ui` is the
+	font family of the signer's own text (_ui_family).
 	"""
 	tk.Label(
 		body,
@@ -539,10 +651,12 @@ def _add_text_block(tk, body, request: dict, heading: str, origin_font: tuple, e
 		justify="left",
 		anchor="w",
 		font=origin_font,
+		fg=COLOR_TEXT,
+		bg=COLOR_BG,
 	).pack(anchor="w", fill="x")
-	tk.Label(body, text=heading, justify="left", anchor="w", wraplength=WRAP_PIXELS).pack(
-		anchor="w", fill="x", pady=(2, 8)
-	)
+	tk.Label(
+		body, text=heading, justify="left", anchor="w", wraplength=WRAP_PIXELS, font=(ui, 13), fg=COLOR_TEXT, bg=COLOR_BG
+	).pack(anchor="w", fill="x", pady=(4, 10))
 	for warning in (*extra_warnings, *request["warnings"]):
 		tk.Label(
 			body,
@@ -550,14 +664,15 @@ def _add_text_block(tk, body, request: dict, heading: str, origin_font: tuple, e
 			justify="left",
 			anchor="w",
 			wraplength=WRAP_PIXELS,
-			fg="#a40000",
-			font=("Helvetica", 13, "bold"),
+			fg=COLOR_WARNING,
+			bg=COLOR_BG,
+			font=(ui, 13, "bold"),
 		).pack(anchor="w", fill="x", pady=(0, 6))
 	claim_font = _claim_font(origin_font)
 	for claim in request["claims"]:
-		tk.Label(body, text=CLAIM_PREFIX + claim, justify="left", anchor="w", font=claim_font).pack(
-			anchor="w", fill="x"
-		)
+		tk.Label(
+			body, text=CLAIM_PREFIX + claim, justify="left", anchor="w", font=claim_font, fg=COLOR_MUTED, bg=COLOR_BG
+		).pack(anchor="w", fill="x")
 
 
 def build_consent_window(layout: dict, request: dict, window, on_result) -> dict:
@@ -581,15 +696,16 @@ def build_consent_window(layout: dict, request: dict, window, on_result) -> dict
 		return {"refused": True}
 
 	state = {"timer": None, "done": False}
+	ui = _ui_family(window)
 	_prepare_window(window, layout["title"])
 
-	body = tk.Frame(window, padx=18, pady=14)
+	body = tk.Frame(window, padx=WINDOW_PADDING, pady=WINDOW_PADDING, bg=COLOR_BG)
 	body.pack(fill="both")
-	_add_text_block(tk, body, request, CONSENT_HEADING, origin_font)
+	_add_text_block(tk, body, request, CONSENT_HEADING, origin_font, ui=ui)
 	for line in CONSENT_FOOTER:
-		tk.Label(body, text=line, justify="left", anchor="w", wraplength=WRAP_PIXELS).pack(
-			anchor="w", fill="x", pady=(8, 0)
-		)
+		tk.Label(
+			body, text=line, justify="left", anchor="w", wraplength=WRAP_PIXELS, font=(ui, 13), fg=COLOR_TEXT, bg=COLOR_BG
+		).pack(anchor="w", fill="x", pady=(8, 0))
 
 	def finish(result) -> None:
 		if result is None or state["done"]:
@@ -604,10 +720,11 @@ def build_consent_window(layout: dict, request: dict, window, on_result) -> dict
 	def press(name: str) -> None:
 		finish(decide(name, guarded=guard.armed))
 
-	row = tk.Frame(window)
-	row.pack(pady=(0, 14))
+	row = tk.Frame(window, bg=COLOR_BG)
+	row.pack(pady=(0, WINDOW_PADDING))
 	buttons = {}
-	# Creation order is Tk's Tab order.
+	# Creation order is Tk's Tab order.  Native buttons (Space, focus, no default=
+	# are Tk's own); only the colour around them follows the window.
 	for name in layout["tab_order"]:
 		button = tk.Button(
 			row,
@@ -615,6 +732,7 @@ def build_consent_window(layout: dict, request: dict, window, on_result) -> dict
 			width=14,
 			state="disabled",
 			command=lambda name=name: press(name),
+			highlightbackground=COLOR_BG,
 		)
 		button.pack(side="left", padx=8)
 		buttons[name] = button
@@ -669,6 +787,14 @@ def build_pin_window(request: dict, window, on_result) -> dict:
 	guard.  If the host cannot fit on the screen (_origin_font is None) nothing is
 	built: the answer is an immediate "cancelled" and no OK button or Entry ever
 	exists (``handle["refused"]`` is True).
+
+	Look (visual only): the Entry sits in a bordered box (``handle["field"]``) whose
+	border belongs to the frame, so it shows while the Entry is disabled (a disabled
+	macOS Tk Entry draws none).  Until the accepted click the box is grey with
+	PIN_PLACEHOLDER drawn over it as a separate Label (``handle["placeholder"]``),
+	never inserted into the Entry; the accepted click turns it white with a blue ring.
+	Cancel and OK are _flat_button_class buttons; OK looks disabled exactly while
+	ok_allowed() is false.
 	"""
 	import tkinter as tk
 
@@ -679,23 +805,68 @@ def build_pin_window(request: dict, window, on_result) -> dict:
 
 	final_try = request["final_try"]
 	state = {"clicked": False, "ignored": False, "timer": None, "done": False}
+	ui = _ui_family(window)
 	_prepare_window(window, PIN_TITLE)
 
-	body = tk.Frame(window, padx=18, pady=14)
+	body = tk.Frame(window, padx=WINDOW_PADDING, pady=WINDOW_PADDING, bg=COLOR_BG)
 	body.pack(fill="both")
-	_add_text_block(tk, body, request, PIN_HEADING, origin_font, (FINAL_TRY_TEXT,) if final_try else ())
-	tk.Label(body, text=PIN_PROMPT, justify="left", anchor="w").pack(anchor="w", fill="x", pady=(10, 2))
-	entry = tk.Entry(body, show="*", width=28, state="disabled", exportselection=False)
-	entry.pack(anchor="w")
-	hint = tk.Label(body, text=PIN_HINT_WAIT, justify="left", anchor="w", wraplength=WRAP_PIXELS)
-	hint.pack(anchor="w", fill="x", pady=(2, 0))
+	_add_text_block(tk, body, request, PIN_HEADING, origin_font, (FINAL_TRY_TEXT,) if final_try else (), ui)
+	tk.Label(
+		body, text=PIN_PROMPT, justify="left", anchor="w", font=(ui, 13, "bold"), fg=COLOR_TEXT, bg=COLOR_BG
+	).pack(anchor="w", fill="x", pady=(16, 6))
+	# halo (window-white; light blue once active) > field (the bordered box) > Entry.
+	halo = tk.Frame(body, bg=COLOR_BG, padx=2, pady=2)
+	halo.pack(anchor="w", fill="x")
+	field = tk.Frame(
+		halo, bg=COLOR_FIELD_WAIT, highlightthickness=1, highlightbackground=COLOR_BORDER, highlightcolor=COLOR_BORDER
+	)
+	field.pack(fill="x")
+	entry = tk.Entry(
+		field,
+		show="*",
+		width=PIN_ENTRY_WIDTH,
+		state="disabled",
+		exportselection=False,
+		font=(ui, PIN_ENTRY_FONT_SIZE),
+		relief="flat",
+		borderwidth=0,
+		highlightthickness=0,
+		bg=COLOR_FIELD_WAIT,
+		disabledbackground=COLOR_FIELD_WAIT,
+		fg=COLOR_TEXT,
+		insertbackground=COLOR_TEXT,
+	)
+	entry.pack(fill="x", padx=12, pady=9)
+	placeholder = tk.Label(field, text=PIN_PLACEHOLDER, anchor="w", font=(ui, 13), fg=COLOR_MUTED, bg=COLOR_FIELD_WAIT)
+	placeholder.place(in_=entry, x=0, rely=0.5, anchor="w")
+	hint = tk.Label(
+		body, text=PIN_HINT_WAIT, justify="left", anchor="w", wraplength=WRAP_PIXELS, font=(ui, 12), fg=COLOR_MUTED, bg=COLOR_BG
+	)
+	hint.pack(anchor="w", fill="x", pady=(6, 0))
 
 	ticked = None
 	tick = None
 	if final_try:
 		ticked = tk.BooleanVar(master=window, value=False)
-		tick = tk.Checkbutton(body, text=FINAL_TRY_TICK, variable=ticked, anchor="w", justify="left")
-		tick.pack(anchor="w", fill="x", pady=(8, 0))
+		tick = tk.Checkbutton(
+			body,
+			text=FINAL_TRY_TICK,
+			variable=ticked,
+			anchor="w",
+			justify="left",
+			font=(ui, 13),
+			fg=COLOR_TEXT,
+			bg=COLOR_BG,
+			activebackground=COLOR_BG,
+			highlightthickness=0,
+		)
+		tick.pack(anchor="w", fill="x", pady=(10, 0))
+
+	def show_active_box() -> None:
+		placeholder.place_forget()
+		halo.configure(bg=COLOR_FOCUS_HALO)
+		field.configure(bg=COLOR_FIELD_ACTIVE, highlightbackground=COLOR_PRIMARY, highlightcolor=COLOR_PRIMARY)
+		entry.configure(bg=COLOR_FIELD_ACTIVE)
 
 	def ok_allowed() -> bool:
 		return state["clicked"] and not guard.armed and (ticked is None or bool(ticked.get()))
@@ -718,12 +889,15 @@ def build_pin_window(request: dict, window, on_result) -> dict:
 		entry.delete(0, "end")
 		finish("ok", value)
 
-	row = tk.Frame(window)
-	row.pack(pady=(0, 14))
-	cancel = tk.Button(row, text="Cancel", width=12, command=lambda: finish("cancel"))
-	cancel.pack(side="left", padx=8)
-	ok = tk.Button(row, text="OK", width=12, state="disabled", command=on_ok)
-	ok.pack(side="left", padx=8)
+	flat_button = _flat_button_class(tk)
+	row = tk.Frame(window, bg=COLOR_BG)
+	row.pack(fill="x", padx=WINDOW_PADDING, pady=(0, WINDOW_PADDING))
+	# Creation order is Tk's Tab order (Cancel, then OK); packed right-aligned.
+	cancel = flat_button(row, text="Cancel", command=lambda: finish("cancel"), font=(ui, 13))
+	ok = flat_button(row, text="OK", command=on_ok, primary=True, font=(ui, 13, "bold"))
+	ok.set_state("disabled")
+	ok.outline.pack(side="right")
+	cancel.outline.pack(side="right", padx=(0, 10))
 
 	def hint_text() -> str:
 		if guard.armed:
@@ -733,7 +907,7 @@ def build_pin_window(request: dict, window, on_result) -> dict:
 		return PIN_HINT_CLICK_AGAIN if state["ignored"] else PIN_HINT_BEFORE_CLICK
 
 	def refresh() -> None:
-		ok.configure(state="normal" if ok_allowed() else "disabled")
+		ok.set_state("normal" if ok_allowed() else "disabled")
 		hint.configure(text=hint_text())
 
 	if tick is not None:
@@ -749,6 +923,7 @@ def build_pin_window(request: dict, window, on_result) -> dict:
 			return
 		state["clicked"] = True
 		entry.configure(state="normal")
+		show_active_box()
 		entry.focus_set()
 		refresh()
 
@@ -777,6 +952,8 @@ def build_pin_window(request: dict, window, on_result) -> dict:
 		"guarded": lambda: guard.armed,
 		"hint": hint,
 		"entry": entry,
+		"field": field,
+		"placeholder": placeholder,
 		"ok": ok,
 		"cancel": cancel,
 		"tick": tick,

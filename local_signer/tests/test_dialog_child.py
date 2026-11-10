@@ -19,6 +19,7 @@ import types
 import unicodedata
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from erp_dsc_local import dialog_child as dc
 
@@ -125,6 +126,7 @@ def install_fake_tkinter(script, mode="ok", trace_path=None, screen_width=FAKE_S
 			self.kw = dict(kw)
 			self.bindings = {}
 			self.value = ""
+			self.placed = False
 			self.app.widgets.append(self)
 
 		def __str__(self):
@@ -132,6 +134,12 @@ def install_fake_tkinter(script, mode="ok", trace_path=None, screen_width=FAKE_S
 
 		def pack(self, **kw):
 			pass
+
+		def place(self, **kw):
+			self.placed = True
+
+		def place_forget(self):
+			self.placed = False
 
 		def configure(self, **kw):
 			self.kw.update(kw)
@@ -159,7 +167,11 @@ def install_fake_tkinter(script, mode="ok", trace_path=None, screen_width=FAKE_S
 	class Label(Widget):
 		def __init__(self, master=None, **kw):
 			super().__init__(master, **kw)
-			log({"label": kw.get("text"), "wraplength": kw.get("wraplength", 0), "font": kw.get("font")})
+			if hasattr(self, "invoke"):
+				# A button drawn as a Label (the PIN window's flat buttons) is a button.
+				log({"button": kw.get("text")})
+			else:
+				log({"label": kw.get("text"), "wraplength": kw.get("wraplength", 0), "font": kw.get("font")})
 
 		def configure(self, **kw):
 			if "text" in kw and kw["text"] != self.kw.get("text"):
@@ -235,6 +247,9 @@ def install_fake_tkinter(script, mode="ok", trace_path=None, screen_width=FAKE_S
 		def resizable(self, *args):
 			pass
 
+		def minsize(self, *args):
+			self.min_size = args
+
 		def attributes(self, *args):
 			pass
 
@@ -295,6 +310,13 @@ def install_fake_tkinter(script, mode="ok", trace_path=None, screen_width=FAKE_S
 					return widget
 			raise AssertionError("fake tk: no %s %r" % (cls.__name__, text))
 
+		def find_button(self, text):
+			"""A native Button, or a button drawn as a Label (it has invoke()), by its text."""
+			for widget in self.widgets:
+				if (type(widget) is Button or (isinstance(widget, Label) and hasattr(widget, "invoke"))) and widget.kw.get("text") == text:
+					return widget
+			raise AssertionError("fake tk: no button %r" % (text,))
+
 		def mainloop(self):
 			for step in script:
 				if self.quitted:
@@ -306,7 +328,7 @@ def install_fake_tkinter(script, mode="ok", trace_path=None, screen_width=FAKE_S
 				elif action == "advance":
 					self.advance(args[0])
 				elif action == "button":
-					self.find(Button, args[0]).invoke()
+					self.find_button(args[0]).invoke()
 				elif action == "tick":
 					self.find(Checkbutton).invoke()
 				elif action == "escape":
@@ -345,6 +367,8 @@ def install_fake_tkinter(script, mode="ok", trace_path=None, screen_width=FAKE_S
 		setattr(module, value.__name__, value)
 	font_module = types.ModuleType("tkinter.font")
 	font_module.Font = Font
+	# Tk always knows Helvetica, Courier and Times; Inter is not installed here.
+	font_module.families = lambda root=None, displayof=None: ("Courier", "Helvetica", "Times")
 	module.font = font_module
 	sys.modules["tkinter"] = module
 	sys.modules["tkinter.font"] = font_module
@@ -1429,6 +1453,160 @@ class TestChildEndToEnd(unittest.TestCase):
 		self.assertEqual(run.stdout, b"")
 
 
+class TestPinWindowLook(unittest.TestCase):
+	"""The PIN window's look (visual-only redesign, 2026-11-10), on the fake tkinter in THIS process.
+
+	The owner could not see where to type: a disabled macOS Tk Entry draws no border.
+	These pin the contract that fixes it without touching behaviour: the Entry sits in a
+	framed box that is visible in BOTH states, a placeholder is drawn BESIDE the Entry
+	(never inserted into it), and OK looks disabled exactly while ok_allowed() is false.
+	"""
+
+	AFTER_GUARD = int(dc.INPUT_GUARD_SECONDS * 1000) + 1
+
+	def build(self, **request):
+		patcher = mock.patch.dict(sys.modules)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		install_fake_tkinter([])
+		import tkinter  # the fake
+
+		self.tk = tkinter
+		self.root = tkinter.Tk()
+		self.results = []
+		self.handle = dc.build_pin_window(dc.validate_request(make_request(kind="pin", **request)), self.root, self.results.append)
+		self.assertFalse(self.handle["refused"])
+		self.root.mapped = True
+		self.root.fire("<Map>")
+		return self.handle
+
+	def advance(self, ms):
+		self.root.advance(ms)
+
+	def click(self):
+		self.root.fire("<ButtonPress>")
+
+	def assertWaitingLook(self, handle):
+		field, entry, placeholder = handle["field"], handle["entry"], handle["placeholder"]
+		self.assertGreaterEqual(field.cget("highlightthickness"), 1, "the box has a border")
+		self.assertEqual(field.cget("highlightbackground"), dc.COLOR_BORDER)
+		self.assertEqual(field.cget("bg"), dc.COLOR_FIELD_WAIT)
+		self.assertNotEqual(dc.COLOR_FIELD_WAIT, dc.COLOR_BG, "the waiting box is filled, not window-coloured")
+		self.assertEqual(entry.cget("state"), "disabled")
+		self.assertEqual(entry.cget("disabledbackground"), dc.COLOR_FIELD_WAIT)
+		self.assertTrue(placeholder.placed, "the placeholder is shown while waiting")
+		self.assertEqual(placeholder.cget("text"), dc.PIN_PLACEHOLDER)
+		self.assertEqual(placeholder.cget("fg"), dc.COLOR_MUTED)
+		self.assertEqual(entry.get(), "", "the placeholder is never text inside the Entry")
+
+	def test_window_is_white_and_wide(self):
+		self.build()
+		self.assertEqual(self.root.cget("bg"), dc.COLOR_BG)
+		self.assertGreaterEqual(self.root.min_size[0], 460)
+
+	def test_pin_box_is_visible_and_empty_while_waiting(self):
+		handle = self.build()
+		entry = handle["entry"]
+		self.assertEqual(entry.cget("show"), "*")
+		self.assertGreaterEqual(entry.cget("width"), 30)
+		self.assertEqual(entry.cget("font")[1], 14)
+		self.assertWaitingLook(handle)
+		# A click inside the guard is ignored: still the waiting look, still empty.
+		self.click()
+		self.assertWaitingLook(handle)
+		self.advance(self.AFTER_GUARD)
+		self.assertWaitingLook(handle)
+
+	def test_pin_box_turns_active_after_the_accepted_click(self):
+		handle = self.build()
+		self.advance(self.AFTER_GUARD)
+		self.click()
+		field, entry, placeholder = handle["field"], handle["entry"], handle["placeholder"]
+		self.assertEqual(entry.cget("state"), "normal")
+		self.assertEqual(entry.cget("bg"), dc.COLOR_FIELD_ACTIVE)
+		self.assertEqual(field.cget("bg"), dc.COLOR_FIELD_ACTIVE)
+		self.assertEqual(field.cget("highlightbackground"), dc.COLOR_PRIMARY, "Frappe-blue focus ring")
+		self.assertGreaterEqual(field.cget("highlightthickness"), 1)
+		self.assertFalse(placeholder.placed, "the placeholder goes once the box is active")
+		self.assertEqual(entry.get(), "", "activation inserts nothing")
+
+	def test_ok_looks_disabled_exactly_while_it_is_disabled(self):
+		handle = self.build(final_try=True)
+		ok, cancel = handle["ok"], handle["cancel"]
+		self.assertEqual(ok.cget("text"), "OK")
+		self.assertEqual(cancel.cget("text"), "Cancel")
+		self.assertNotEqual(dc.COLOR_PRIMARY_DISABLED, dc.COLOR_PRIMARY)
+
+		def assert_disabled_look(when):
+			self.assertEqual(ok.cget("state"), "disabled", when)
+			self.assertEqual(ok.cget("bg"), dc.COLOR_PRIMARY_DISABLED, when)
+
+		assert_disabled_look("guard armed")
+		self.advance(self.AFTER_GUARD)
+		assert_disabled_look("guard over, no click yet")
+		self.click()
+		assert_disabled_look("clicked, final-try tick-box not ticked")
+		handle["tick"].invoke()
+		self.assertEqual(ok.cget("state"), "normal")
+		self.assertEqual(ok.cget("bg"), dc.COLOR_PRIMARY)
+		self.assertEqual(ok.cget("fg"), "#ffffff")
+		self.assertEqual(cancel.cget("state"), "normal")
+		self.assertEqual(cancel.cget("bg"), dc.COLOR_SECONDARY)
+		# The outline is a Frame around the Label (macOS draws no ring on a nested Label).
+		self.assertEqual(cancel.outline.cget("bg"), dc.COLOR_BORDER, "Cancel has a grey outline")
+		self.assertEqual(cancel.outline.cget("padx"), 1)
+		self.assertEqual(ok.outline.cget("bg"), dc.COLOR_PRIMARY)
+		# Keyboard focus shows a ring; losing it restores the outline.  Both bindings
+		# leave the event to the window (no "break"), so the input guard still sees it.
+		self.assertIsNone(cancel.bindings["<FocusIn>"](None))
+		self.assertEqual(cancel.outline.cget("bg"), dc.COLOR_BUTTON_FOCUS)
+		self.assertIsNone(cancel.bindings["<FocusOut>"](None))
+		self.assertEqual(cancel.outline.cget("bg"), dc.COLOR_BORDER)
+
+	def test_flat_button_is_inert_while_disabled_and_space_activates_it(self):
+		handle = self.build()
+		flat = type(handle["ok"])
+		pressed = []
+		button = flat(self.root, text="X", command=lambda: pressed.append(1))
+		self.assertEqual(int(button.cget("takefocus")), 1, "Tab reaches it")
+		self.assertNotIn("<Return>", button.bindings, "Return never activates a button")
+		space = button.bindings["<KeyPress-space>"]
+		button.set_state("disabled")
+		button.invoke()
+		space(None)
+		self.assertEqual(pressed, [], "a disabled button ignores invoke() and Space")
+		button.set_state("normal")
+		button.invoke()
+		space(None)
+		self.assertEqual(pressed, [1, 1])
+
+	def test_cancel_and_ok_buttons_still_answer(self):
+		handle = self.build()
+		handle["ok"].invoke()
+		self.assertEqual(self.results, [], "OK is inert before the click")
+		self.advance(self.AFTER_GUARD)
+		self.click()
+		handle["entry"].insert("end", PIN_SENTINEL)
+		handle["ok"].invoke()
+		self.assertEqual(self.results, [{"v": 1, "kind": "pin", "result": "entered", "value": PIN_SENTINEL}])
+		self.assertEqual(handle["entry"].get(), "", "the Entry is cleared once read")
+		cancelled = self.build()
+		cancelled["cancel"].invoke()
+		self.assertEqual(self.results[-1], {"v": 1, "kind": "pin", "result": "cancelled"})
+
+	def test_the_pin_is_held_by_the_entry_alone(self):
+		handle = self.build()
+		self.advance(self.AFTER_GUARD)
+		self.click()
+		handle["entry"].insert("end", PIN_SENTINEL)
+		for widget in self.root.widgets:
+			if widget is handle["entry"]:
+				continue
+			self.assertNotIn(PIN_SENTINEL, repr(widget.kw), widget)
+			self.assertNotIn(PIN_SENTINEL, widget.value, widget)
+		self.assertNotIn(PIN_SENTINEL, repr(handle["entry"].kw), "never an option such as text=")
+
+
 @unittest.skipUnless(UI_TESTS, "real Tk windows: set ERP_DSC_UI_TESTS=1 on a desktop session")
 class TestRealTkWindows(unittest.TestCase):
 	@classmethod
@@ -1581,6 +1759,52 @@ class TestRealTkWindows(unittest.TestCase):
 		self.assertEqual(str(self.handle["ok"].cget("state")), "normal")
 		self.handle["ok"].invoke()
 		self.assertEqual(self.results, [{"v": 1, "kind": "pin", "result": "entered", "value": "1234"}])
+
+	def test_pin_box_is_drawn_around_the_entry_in_both_states(self):
+		self.handle = dc.build_pin_window(make_request(kind="pin"), self.root, self.results.append)
+		self.pump(0.3)
+		field, entry = self.handle["field"], self.handle["entry"]
+		self.assertIs(entry.master, field, "the box wraps the Entry itself")
+		for when in ("waiting", "active"):
+			with self.subTest(when=when):
+				self.assertGreaterEqual(int(str(field.cget("highlightthickness"))), 1)
+				self.assertGreater(field.winfo_height(), entry.winfo_height() + 2, "the border is drawn outside the Entry")
+				self.assertGreaterEqual(field.winfo_width(), 400, "a wide, obvious box")
+				self.assertEqual(entry.get(), "")
+			if when == "waiting":
+				self.assertEqual(str(entry.cget("state")), "disabled")
+				self.assertTrue(self.handle["placeholder"].winfo_ismapped())
+				self.pump(dc.INPUT_GUARD_SECONDS + 0.3)
+				self.handle["click"]()
+				self.root.update()
+		self.assertEqual(str(entry.cget("state")), "normal")
+		self.assertFalse(self.handle["placeholder"].winfo_ismapped())
+		self.assertEqual(str(field.cget("highlightbackground")), dc.COLOR_PRIMARY)
+
+	def press_and_release(self, widget, x, y):
+		widget.event_generate("<ButtonPress-1>", x=x, y=y)
+		widget.event_generate("<ButtonRelease-1>", x=x, y=y)
+		self.root.update()
+
+	def test_pin_buttons_answer_a_mouse_release_inside_only_when_enabled(self):
+		self.handle = dc.build_pin_window(make_request(kind="pin"), self.root, self.results.append)
+		self.pump(0.3)
+		ok, entry = self.handle["ok"], self.handle["entry"]
+		self.press_and_release(ok, 5, 5)  # during the guard
+		self.assertEqual(self.results, [])
+		self.assertEqual(str(entry.cget("state")), "disabled")
+		self.pump(dc.INPUT_GUARD_SECONDS + 0.3)
+		# The accepted first click lands ON the disabled OK: it enables the Entry, and
+		# its release must not submit (the press began while OK was disabled).
+		self.press_and_release(ok, 5, 5)
+		self.assertEqual(str(entry.cget("state")), "normal")
+		self.assertEqual(self.results, [])
+		entry.insert(0, "1234")
+		self.press_and_release(ok, -20, -20)  # released outside the button
+		self.assertEqual(self.results, [])
+		self.press_and_release(ok, 5, 5)
+		self.assertEqual(self.results, [{"v": 1, "kind": "pin", "result": "entered", "value": "1234"}])
+		self.assertEqual(entry.get(), "")
 
 	def test_long_host_is_one_unwrapped_line(self):
 		attack = "https://erp.mycompany.com.ap-south-1-secure-gateway.example"
