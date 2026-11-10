@@ -23,6 +23,16 @@ Configure **DSC Signing Settings**, enable one or both methods, validate the PFX
 
 This app is the standalone successor to `erp_pdf_signer`. Do not enable both apps on the same site: both integrate with Sales Invoice and reuse the existing signature custom fields for migration compatibility. Existing signed-file links and audit history remain usable.
 
+### Frappe Cloud (Frappe v14, v15, v16)
+
+1. In your Frappe Cloud dashboard open the bench group, choose **Apps → Add App → Add from GitHub**, select this repository and the `main` branch, and deploy. The app declares ERPNext as a required app and supports Frappe 14, 15 and 16.
+2. Install **ERP DSC Signer** on the site (**Site → Apps → Install App**). Installing creates the read-only signing fields on Sales Invoice.
+3. Open **DSC Signing Settings**, enable the USB method, and keep the workstation signer address `http://127.0.0.1:17777`.
+4. The server must be able to reach the certifying authority for the revocation check (`signxca.com`, `ocsp.signxca.com`, `ocvs.gov.in`, `cca.gov.in`). Frappe Cloud allows outbound web access by default.
+5. On each user's computer install the workstation signer (see below) and the USB token's own driver, then pair the site once from the Sign dialog.
+
+USB signing never sends the PIN or the private key to the server. Only the certifying authority (CCA India) hierarchy is trusted: a certificate that cannot be authenticated through it is refused and nothing is signed.
+
 ## Workstation signer
 
 The companion package is in `local_signer/`. Install it on each workstation that uses a USB token:

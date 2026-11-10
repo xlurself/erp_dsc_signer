@@ -1,5 +1,8 @@
 app_name = "erp_dsc_signer"
 app_title = "ERP DSC Signer"
+
+# Sales Invoice (and its custom fields) come from ERPNext, so it must be installed first.
+required_apps = ["frappe/erpnext"]
 app_publisher = "XLURSELF"
 app_description = "Digital signing for ERPNext documents using PFX certificates or USB DSC tokens"
 app_email = "info@xlurself.com"

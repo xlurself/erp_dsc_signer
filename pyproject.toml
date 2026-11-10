@@ -14,7 +14,7 @@ dependencies = [
     # endesive's vendored PyPDF2_annotate imports attr without declaring it.
     "attrs>=22.0.0",
     # F2: ca_trust uses cryptography.x509.verification (PolicyBuilder/Store) and x509.ocsp.
-    "cryptography>=42.0.0",
+    "cryptography>=42.0.0,<51",
 ]
 
 [build-system]
@@ -24,7 +24,7 @@ build-backend = "flit_core.buildapi"
 # Frappe versions this app supports. Required by Frappe Cloud and used by
 # `bench validate-dependencies`. Parsed as a semantic_version SimpleSpec.
 [tool.bench.frappe-dependencies]
-frappe = ">=14.0.0,<16.0.0"
+frappe = ">=14.0.0,<17.0.0"
 
 # These dependencies are only installed when developer mode is enabled
 [tool.bench.dev-dependencies]
