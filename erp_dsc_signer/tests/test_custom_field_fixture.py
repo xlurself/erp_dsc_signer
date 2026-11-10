@@ -29,6 +29,13 @@ class TestSalesInvoiceCustomFields(unittest.TestCase):
 		self.assertEqual(6, len(sales_invoice_fields))
 		self.assertEqual([], [item["fieldname"] for item in sales_invoice_fields if item.get("no_copy") != 1])
 
+	def test_no_signing_field_can_be_edited_after_submit(self):
+		# Frappe rule: a submitted document is read-only. The server writes these fields with
+		# frappe.db.set_value (no allow_on_submit needed), so a client set_value must not be able to
+		# forge "digitally signed", the signed file, the time or the signer.
+		fields = [item for item in _fixture_fields() if item["dt"] == "Sales Invoice"]
+		self.assertEqual([], [item["fieldname"] for item in fields if item.get("allow_on_submit", 0) != 0])
+
 	def test_signature_verification_record_cannot_be_changed_after_submit(self):
 		# finding 1: allow_on_submit would let frappe.client.set_value forge {"verified": true}.
 		fields = {item["name"]: item for item in _fixture_fields()}
