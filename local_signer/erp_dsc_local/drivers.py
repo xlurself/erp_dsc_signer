@@ -41,8 +41,12 @@ from .logs import exception_name
 from .providers import KNOWN_PATHS
 from .token import PROBE_TIMEOUT_SECONDS, TokenDriverNotResponding, run_probe
 
-NAME_NEEDLES = ("pkcs11", "p11", "castle", "wdpkcs", "etpkcs", "signature", "innait", "etoken")
+NAME_NEEDLES = ("pkcs11", "castle", "wdpkcs", "etpkcs", "signature", "innait", "etoken")
 LIBRARY_SUFFIXES = (".dylib", ".so", ".dll")
+# "p11" only as a word part (SignatureP11, libdeep_p11), never inside msvcp110.
+_P11_WORD = re.compile(r"(?:^|[^a-z0-9])p11(?:[^0-9]|$)|signaturep11|wdp11")
+# Look-alikes seen on a real Windows machine: .NET BouncyCastle, p11-kit, Java's j2pkcs11.
+NOT_DRIVERS = ("bouncycastle", "p11-kit", "j2pkcs11")
 _VERSIONED_SO = re.compile(r"\.so(?:\.[0-9]+)+$")
 MAX_ENTRIES = 50_000
 MAX_SECONDS = 10.0
@@ -67,7 +71,9 @@ def plausible_library_name(name: str) -> bool:
 
 def _looks_like_driver(name: str) -> bool:
 	lower = name.lower()
-	return plausible_library_name(name) and any(needle in lower for needle in NAME_NEEDLES)
+	if not plausible_library_name(name) or any(word in lower for word in NOT_DRIVERS):
+		return False
+	return any(needle in lower for needle in NAME_NEEDLES) or bool(_P11_WORD.search(lower))
 
 
 def scan_roots(system=None, env=None) -> list:
@@ -279,6 +285,9 @@ def _read_config(config: Path) -> tuple[bytes, dict]:
 	return original, raw
 
 
+_ALREADY_KNOWN = "it is already known to the helper"
+
+
 def _duplicate(path: str, raw: dict, system: str) -> str | None:
 	key = os.path.normcase(os.path.normpath(path))
 	providers = raw.get("providers") or {}
@@ -290,7 +299,7 @@ def _duplicate(path: str, raw: dict, system: str) -> str | None:
 			return "it is already listed in config.json (providers.additional_paths)."
 	for paths in KNOWN_PATHS.get(system, {}).values():
 		if key in {os.path.normcase(os.path.normpath(item)) for item in paths}:
-			return "it is already known to the helper (a built-in location); nothing to add."
+			return _ALREADY_KNOWN + " (a built-in location); nothing to add."
 	return None
 
 
@@ -322,6 +331,9 @@ def add_module(config_path, module_path, *, verify=False, probe=None, system=Non
 		path = check_module_path(module_path, system=system)
 		duplicate = _duplicate(path, raw, system)
 		if duplicate:
+			if duplicate.startswith(_ALREADY_KNOWN):
+				print(f"{_printable(path)} was not added: {duplicate}")
+				return 0  # nothing to do is success: installer scripts must not fail on a built-in path
 			raise Refused(f"{_printable(path)} was not added: {duplicate}")
 		note = _verify(path, probe) if verify else None
 		module_id = _module_id(path)

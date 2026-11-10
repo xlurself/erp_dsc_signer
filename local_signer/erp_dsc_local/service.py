@@ -49,7 +49,7 @@ import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import dialog_child
+from . import __version__, dialog_child
 from .certificates import is_signing_certificate
 from .errors import (
 	CertificatesHidden,
@@ -73,7 +73,7 @@ from .trust import TrustStore
 from .ui import DialogHost
 
 
-VERSION = "0.2.0"
+VERSION = __version__
 
 # The only paths an unpaired origin may talk to.
 BOOTSTRAP_PATHS = frozenset({"/v1/health", "/v1/pair"})

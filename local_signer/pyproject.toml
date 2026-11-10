@@ -1,6 +1,6 @@
 [project]
 name = "erp-dsc-local"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Loopback USB DSC signing service for ERP DSC Signer"
 requires-python = ">=3.10"
 # attrs: endesive imports ``attr`` for the signature appearance (PyPDF2_annotate) but does not
@@ -8,6 +8,9 @@ requires-python = ">=3.10"
 # every ERP signing fails inside cms.sign (ModuleNotFoundError: No module named 'attr').
 # cryptography>=42: endesive.pdf imports cryptography.x509.verification, absent in 41.
 dependencies = ["PyKCS11>=1.5.12", "endesive>=2.19.0,<3", "cryptography>=42", "attrs>=22"]
+
+[tool.setuptools.dynamic]
+version = {attr = "erp_dsc_local.__version__"}
 
 [project.scripts]
 erp-dsc-local = "erp_dsc_local.cli:main"

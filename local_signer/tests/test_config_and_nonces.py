@@ -8,6 +8,23 @@ from erp_dsc_local.nonces import NonceStore
 
 
 class TestConfig(unittest.TestCase):
+	def test_shipped_example_loads_and_is_valid_on_every_os(self):
+		# Windows test 2026-11-10: the example held "/absolute/path/..." which Windows rejects.
+		example = Path(__file__).resolve().parents[1] / "config.example.json"
+		load_config(example)
+		from pathlib import PurePosixPath, PureWindowsPath
+		for paths in json.loads(example.read_text(encoding="utf-8")).get("providers", {}).get("additional_paths", {}).values():
+			for item in paths:
+				self.assertTrue(PurePosixPath(item).is_absolute() and PureWindowsPath(item).is_absolute(), item)
+
+	def test_bad_additional_path_names_the_entry(self):
+		with tempfile.TemporaryDirectory() as directory:
+			path = Path(directory) / "config.json"
+			path.write_text('{"providers":{"additional_paths":{"generic_pkcs11":["relative/lib.dll"]}}}', encoding="utf-8")
+			with self.assertRaises(ConfigurationError) as ctx:
+				load_config(path)
+		self.assertIn("providers.additional_paths.generic_pkcs11[0]", str(ctx.exception))
+
 	def test_rejects_non_loopback_host(self):
 		with tempfile.TemporaryDirectory() as directory:
 			path = Path(directory) / "config.json"

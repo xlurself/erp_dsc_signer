@@ -44,6 +44,8 @@ cp config.example.json config.json
 erp-dsc-local --config config.json
 ```
 
+Needs Python 3.10 or newer (64-bit on Windows, matching a 64-bit token driver). On Windows use `copy config.example.json config.json` and `venv\Scripts\erp-dsc-local`. The example lists no driver paths: to point at a driver the helper does not know, use `--add-module` with an absolute path (for example `C:\Windows\System32\vendor-pkcs11.dll` or `/usr/local/lib/libvendor-pkcs11.dylib`).
+
 The service binds only to loopback. Supported provider profiles include ePass, SafeNet, ProxKey, WatchData, and a configured generic PKCS#11 module. The token vendor's current middleware is still required, and Apple Silicon needs a compatible native or Rosetta driver.
 
 ### Pairing a site
@@ -77,7 +79,7 @@ own process. Without `--config` they use `~/.erp-dsc-local/config.json`.
 erp-dsc-local --doctor                          # support report: versions, port, drivers, certificates (no secrets)
 erp-dsc-local --find-drivers                    # list token driver files in the usual folders (nothing is loaded)
 erp-dsc-local --add-module /absolute/path/libvendor-pkcs11.dylib --verify   # add a driver to config.json
-erp-dsc-local --show-log-path                   # where the log file is (logs/erp-dsc-local.log next to config.json)
+erp-dsc-local --show-log-path                   # where the log file is (logs/erp-dsc-local.log next to config.json); pass the same --config as the running helper
 erp-dsc-local --install-autostart [--yes]       # start at every login (macOS LaunchAgent, Windows Scheduled Task)
 erp-dsc-local --uninstall-autostart [--yes]     # remove that login entry again
 ```

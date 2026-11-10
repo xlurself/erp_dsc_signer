@@ -11,8 +11,6 @@
   },
   "providers": {
     "custom_modules": [],
-    "additional_paths": {
-      "generic_pkcs11": ["/absolute/path/to/vendor-pkcs11-library"]
-    }
+    "additional_paths": {}
   }
 }

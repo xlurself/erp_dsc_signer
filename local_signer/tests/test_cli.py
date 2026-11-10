@@ -302,3 +302,14 @@ class TestCoreDumpHelperIsShared(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestVersionSingleSource(unittest.TestCase):
+	def test_package_service_and_pyproject_agree(self):
+		import re
+		from pathlib import Path
+		from erp_dsc_local import __version__, service
+		self.assertEqual(__version__, service.VERSION)
+		text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+		self.assertIn('attr = "erp_dsc_local.__version__"', text)
+		self.assertIsNone(re.search(r'^version\s*=\s*"', text, re.M))

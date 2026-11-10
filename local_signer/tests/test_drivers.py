@@ -318,9 +318,27 @@ class TestAddModuleRefuses(AddModuleCase):
 		self.assertEqual(self.original, self.config.read_bytes())
 		self.assertEqual(backup, (self.config_dir / "config.json.bak").read_bytes())
 
-	def test_a_built_in_location_is_a_duplicate(self):
+	def test_a_built_in_location_is_success_and_changes_nothing(self):
+		# Windows test 2026-11-10: an installer script must not fail where the driver is a built-in path.
 		with mock.patch.dict(KNOWN_PATHS, {"Darwin": {"generic_pkcs11": (str(self.library),)}}):
-			self.assert_refused(self.library, "already known")
+			code, out, err = self.add(self.library)
+		self.assertEqual(0, code, err)
+		self.assertIn("already known", out)
+		self.assertNotIn("Added", out)
+		self.assert_unchanged()
+
+	def test_real_refusals_still_exit_2(self):
+		code, _out, err = self.add("vendor/relative.dylib")
+		self.assertEqual(2, code)
+		self.assertIn("absolute", err)
+
+	def test_bouncycastle_and_msvcp_are_not_drivers_but_epass_castle_is(self):
+		for name in ("BouncyCastle.Crypto.dll", "msvcp110.dll", "msvcp110_win.dll", "libp11-kit-0.dll"):
+			with self.subTest(name=name):
+				self.assertFalse(drivers._looks_like_driver(name))
+		for name in ("libcastle_v2.1.0.0.dylib", "libdeep_p11.so", "SignatureP11.dll", "opensc-pkcs11.so", "WDPKCS.DLL"):
+			with self.subTest(name=name):
+				self.assertTrue(drivers._looks_like_driver(name))
 
 	def test_invalid_or_linked_config_is_never_rewritten(self):
 		self.original = b"{not json"

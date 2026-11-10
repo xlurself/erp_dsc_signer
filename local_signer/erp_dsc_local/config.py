@@ -182,9 +182,11 @@ def _provider_paths(value: object) -> dict[str, tuple[str, ...]]:
 		if provider not in PROVIDER_IDS or not isinstance(paths, list):
 			raise ConfigurationError("additional_paths keys must be known providers with list values.")
 		normalized = []
-		for path in paths:
+		for index, path in enumerate(paths):
 			if not isinstance(path, str) or not Path(path).expanduser().is_absolute():
-				raise ConfigurationError("Every additional PKCS#11 path must be absolute.")
+				raise ConfigurationError(
+					f"providers.additional_paths.{provider}[{index}] is not an absolute path: every additional PKCS#11 path must be absolute."
+				)
 			normalized.append(str(Path(path).expanduser()))
 		result[provider] = tuple(normalized)
 	return result
