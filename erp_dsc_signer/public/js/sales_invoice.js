@@ -97,7 +97,7 @@ async function sign_with_usb(frm, replace, provider, base_url) {
 			certificate,
 			pdf_base64: prepared.pdf_base64,
 			pdf_sha256: prepared.pdf_sha256,
-			signing_request: prepared.signing_request,
+			signing_request: Object.assign({}, prepared.signing_request, {signature_meta: authenticated.signature_meta}),
 		});
 		const completed = await frappe_request("erp_dsc_signer.api.signing.complete_usb_signing", {
 			session_id: prepared.session_id,

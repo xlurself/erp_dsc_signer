@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 
 import frappe
+from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
 from frappe import _
 
@@ -19,6 +20,7 @@ from erp_dsc_signer.utils import ca_trust
 from erp_dsc_signer.utils.pdf_signer import (
 	PFX_METHOD,
 	USB_METHOD,
+	_cert_cn,
 	_signature_metadata,
 	attach_signed_invoice_pdf,
 	generate_invoice_pdf,
@@ -122,8 +124,6 @@ def prepare_usb_signing(name, provider="auto", print_format=None, letterhead=Non
 	except USBSignatureError as exc:
 		frappe.throw(_(str(exc)))
 
-	now = frappe.utils.now_datetime().astimezone()
-	meta = _signature_metadata(pdf_bytes, settings, _("USB DSC signer"), now, _format_tz_offset(now))
 	session_id, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
 	expires = frappe.utils.cint(settings.usb_session_expiry_minutes or 5) * 60
 	payload = {
@@ -147,7 +147,6 @@ def prepare_usb_signing(name, provider="auto", print_format=None, letterhead=Non
 		"signing_request": {
 			"hash_algorithm": "sha256",
 			"document_name": doc.name,
-			"signature_meta": meta,
 			"timestamp_url": settings.timestamp_url if frappe.utils.cint(settings.enable_timestamp) else None,
 		},
 	}
@@ -184,7 +183,20 @@ def authenticate_usb_certificate(session_id, certificate_der_base64):
 	)
 	if not _rewrite_session(key, fresh, _session_seconds_left(fresh)):
 		frappe.throw(_(SESSION_UNAVAILABLE_MESSAGE))
-	return {"verified": True, "certificate_sha256": fresh["certificate_sha256"], "record": record}
+	return {
+		"verified": True,
+		"certificate_sha256": fresh["certificate_sha256"],
+		"record": record,
+		# The visible stamp names the holder of the authenticated certificate, never a generic label.
+		"signature_meta": _stamp_metadata_for(der, fresh),
+	}
+
+
+def _stamp_metadata_for(der, payload):
+	now = frappe.utils.now_datetime().astimezone()
+	holder = _cert_cn(x509.load_der_x509_certificate(der))
+	pdf_bytes = base64.b64decode(payload["pdf_base64"], validate=True)
+	return _signature_metadata(pdf_bytes, get_signing_settings(USB_METHOD), holder, now, _format_tz_offset(now))
 
 
 @frappe.whitelist()

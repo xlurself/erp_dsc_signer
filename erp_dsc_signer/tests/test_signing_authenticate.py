@@ -340,6 +340,17 @@ class TestAuthenticateEndpoint(_Base):
 		self.assertEqual(LEAF_DER, bytes(self.auth.call_args.args[0]))
 		self.assertEqual({"now": NOW}, self.auth.call_args.kwargs)
 
+	def test_signature_stamp_names_the_authenticated_certificate_holder(self):
+		result = self.authenticate(self.prepare())
+		signing._signature_metadata.assert_called_once()
+		self.assertEqual("Vinay Saraf", signing._signature_metadata.call_args.args[2])
+		self.assertEqual({"name": "signer"}, result["signature_meta"])
+
+	def test_prepare_does_not_stamp_a_generic_signer_name(self):
+		prepared = self.prepare()
+		signing._signature_metadata.assert_not_called()
+		self.assertNotIn("signature_meta", prepared["signing_request"])
+
 	def test_session_is_marked_not_consumed(self):
 		prepared = self.prepare()
 		before = self.session(prepared)
