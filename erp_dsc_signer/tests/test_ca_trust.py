@@ -41,6 +41,7 @@ SENTINEL = "S3NT1NEL-PIN-4417"
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 CCA_ROOT_SHA256 = "9a3fd3176798e842ddcb12c262f11cfacca70a8b84c6ea6fda30842a95a94cd8"
+CCA_SPL_ROOT_SHA256 = "b724689b79b2ef9421ef8f5cc733eb093851b170ee715177005a09f226d8c91a"  # CCA India 2022 SPL
 SIGNX_CA_SHA256 = "a8d6363afeb8fe0fc8b627022954d5681872ea4d998e59b3d8395abcc3953452"
 SIGNX_SUB_SHA256 = "d29b3587cd540c45fdb29b416c73eec4c7311f721d037f16013a96ce55d4f824"
 
@@ -1000,6 +1001,41 @@ class URLPolicyTest(_Base):
 		self.assertEqual(ca_trust.TOTAL_BUDGET, 25.0)
 
 
+class _SegmentedSocket:
+	"""A socket that, like a real one, delivers at most one TCP segment per recv and fails with EBADF when read after
+	close(). Unlike _FakeSocket it models closing, which is what the "Connection: close" bug depended on."""
+
+	def __init__(self, segments):
+		self._segments = list(segments)
+		self.closed = False
+		self.sent = b""
+
+	def settimeout(self, value):
+		pass
+
+	def sendall(self, data):
+		if self.closed:
+			raise OSError(9, "Bad file descriptor")
+		self.sent += data
+
+	def recv_into(self, buffer, nbytes=0):
+		if self.closed:
+			raise OSError(9, "Bad file descriptor")
+		if not self._segments:
+			return 0
+		segment = self._segments[0]
+		size = min(len(buffer), len(segment))
+		buffer[:size] = segment[:size]
+		if size == len(segment):
+			self._segments.pop(0)
+		else:
+			self._segments[0] = segment[size:]
+		return size
+
+	def close(self):
+		self.closed = True
+
+
 class _FakeSocket:
 	"""Serves ``response``. With a fake ``clock``, byte i arrives ``delay(i)`` s after the previous recv
 	returned (one byte per recv when delayed); a recv whose timeout is shorter than that wait times out
@@ -1113,6 +1149,27 @@ class TransportTest(unittest.TestCase):
 				deadline = 1001.0
 				for at, value in sock.armed:
 					self.assertLessEqual(value, deadline - at + 1e-6)
+
+	def test_response_split_across_segments_is_read_after_connection_close_header(self):
+		# Real servers answer "Connection: close" and send headers and body in separate TCP segments (and a CRL
+		# in many). http.client closes the connection object as soon as the headers are read; the body must
+		# still be readable. Found live 2026-11-10: every real CRL fetch and ~8% of OCSP fetches failed with
+		# "[Errno 9] Bad file descriptor", so revocation was sporadically "unavailable".
+		for label, body in (("small body in its own segment", b"x" * 1800), ("large CRL-size body", b"y" * 300000)):
+			with self.subTest(label):
+				head = b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: %d\r\n\r\n" % len(body)
+				segments = [head] + [body[i : i + 16384] for i in range(0, len(body), 16384)]
+				sock = _SegmentedSocket(segments)
+				t = ca_trust.HttpTransport(resolver=_resolver("93.184.216.34"), connector=lambda a, timeout: sock)
+				self.assertEqual(t("http://signxca.com/x", max_bytes=400000, timeout=25), body)
+				self.assertTrue(sock.closed)  # and the real socket IS closed when the transport is done
+
+	def test_socket_is_closed_even_when_the_status_is_refused(self):
+		sock = _SegmentedSocket([b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"])
+		t = ca_trust.HttpTransport(resolver=_resolver("93.184.216.34"), connector=lambda a, timeout: sock)
+		with self.assertRaises(ca_trust.FetchRefused):
+			t("http://signxca.com/x", max_bytes=100, timeout=25)
+		self.assertTrue(sock.closed)
 
 	def test_fast_response_within_budget_still_passes_positive_control(self):
 		clock = [1000.0]
@@ -1325,17 +1382,33 @@ class PinnedRootsTest(unittest.TestCase):
 		exec(compile(source, pinned_roots.__file__, "exec"), namespace)
 		return namespace
 
-	def test_pinned_root_is_cca_india_2022(self):
+	def test_pinned_roots_are_exactly_the_two_live_cca_india_roots(self):
+		# cca.gov.in lists two roots that are valid today: CCA India 2022 and CCA India 2022 SPL (both to 2042).
+		# The 2014 / 2015 SPL (expired 2024 / 2025) and older roots must NOT be pinned: they can validate nothing.
 		self.assertEqual(pinned_roots.CCA_INDIA_2022_SHA256, CCA_ROOT_SHA256)
-		self.assertEqual([sha(c) for c in pinned_roots.PINNED_ROOTS], [CCA_ROOT_SHA256])
-		self.assertEqual(pinned_roots.PINNED_ROOT_SHA256, frozenset({CCA_ROOT_SHA256}))
-		root = pinned_roots.PINNED_ROOTS[0]
-		self.assertEqual(root.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value, "CCA India 2022")
-		self.assertEqual(root.subject, root.issuer)
+		self.assertEqual(pinned_roots.CCA_INDIA_2022_SPL_SHA256, CCA_SPL_ROOT_SHA256)
+		self.assertEqual([sha(c) for c in pinned_roots.PINNED_ROOTS], [CCA_ROOT_SHA256, CCA_SPL_ROOT_SHA256])
+		self.assertEqual(pinned_roots.PINNED_ROOT_SHA256, frozenset({CCA_ROOT_SHA256, CCA_SPL_ROOT_SHA256}))
+		names = [r.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value for r in pinned_roots.PINNED_ROOTS]
+		self.assertEqual(names, ["CCA India 2022", "CCA India 2022 SPL"])
+		for root in pinned_roots.PINNED_ROOTS:
+			self.assertEqual(root.subject, root.issuer)
+			self.assertTrue(root.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
+			self.assertGreater(root.not_valid_after_utc.year, 2040)
 
 	def test_untampered_source_imports_control(self):
 		namespace = self._exec(self._source())
-		self.assertEqual(namespace["PINNED_ROOT_SHA256"], frozenset({CCA_ROOT_SHA256}))
+		self.assertEqual(namespace["PINNED_ROOT_SHA256"], frozenset({CCA_ROOT_SHA256, CCA_SPL_ROOT_SHA256}))
+
+	def test_spl_root_tamper_fails_at_import(self):
+		source = self._source()
+		self.assertEqual(source.count(CCA_SPL_ROOT_SHA256), 1)
+		for tampered in (source.replace(CCA_SPL_ROOT_SHA256, "0" * 64), source.replace("MIIFPDCC", "MIIFPDCD", 1)):
+			self.assertNotEqual(tampered, source)
+			with self.assertRaises(RuntimeError) as cm:
+				self._exec(tampered)
+			self.assertEqual(type(cm.exception).__name__, "PinnedRootError")
+			self.assertIn("2022 SPL", str(cm.exception))
 
 	def test_fingerprint_mismatch_fails_at_import(self):
 		source = self._source()

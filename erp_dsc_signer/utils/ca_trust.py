@@ -737,6 +737,8 @@ class _DeadlineSocket:
 	def __init__(self, sock, deadline):
 		self._sock = sock
 		self._deadline = deadline
+		self._readers = 0  # makefile() readers not yet closed
+		self._closing = False
 
 	def _arm(self):
 		self._sock.settimeout(_bounded(READ_TIMEOUT, self._deadline))
@@ -752,10 +754,21 @@ class _DeadlineSocket:
 	def makefile(self, mode="rb", buffering=None):
 		if mode != "rb":
 			raise ValueError("read-only binary socket file")
+		self._readers += 1
 		return io.BufferedReader(_DeadlineReader(self))
 
+	def _reader_closed(self):
+		self._readers -= 1
+		if self._closing and self._readers <= 0:
+			self._sock.close()
+
 	def close(self):
-		self._sock.close()
+		# Like socket.close(): while a makefile() reader is still open the real socket stays open, because
+		# http.client closes the connection as soon as the headers of a "Connection: close" answer are read
+		# and the body is read afterwards. HttpTransport.__call__ closes the real socket itself when done.
+		self._closing = True
+		if self._readers <= 0:
+			self._sock.close()
 
 
 class _DeadlineReader(io.RawIOBase):
@@ -768,6 +781,11 @@ class _DeadlineReader(io.RawIOBase):
 
 	def readinto(self, buffer):
 		return self._sock.recv_into(buffer)
+
+	def close(self):
+		if not self.closed:
+			super().close()
+			self._sock._reader_closed()
 
 
 def _bounded(limit, deadline):

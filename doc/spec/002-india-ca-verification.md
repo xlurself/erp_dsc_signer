@@ -136,3 +136,17 @@ Python `x509.verification` API (needs cryptography >= 42; confirm bench env vers
 15. **Existing fields (not changed here):** the five `custom_signed_*` custom fields still have allow_on_submit=1, so a user
     with Sales Invoice write permission can set them via the client API (the Desk then shows "Signature valid", never
     "Verified"). They are shared with erp_pdf_signer; owner decision pending.
+    **Closed 2026-11-10:** all six signing fields now have allow_on_submit=0 (owner decision); the server writes them with
+    frappe.db.set_value, so signing does not depend on them being editable.
+16. **Pinned roots (2026-11-10, owner: "add all CCA roots"):** two roots are pinned, the two that cca.gov.in lists as valid
+    today: CCA India 2022 and CCA India 2022 SPL (both to 2042). CCA India 2014 (expired 2024-03-05), 2015 SPL (expired
+    2025-01-29), 2011, 2007 and older are deliberately NOT pinned: an expired root validates no certificate at signing time,
+    so pinning it would add attack surface and accept nothing. The SPL fingerprint is the SHA-256 of the file served over
+    https by cca.gov.in; the site prints no fingerprint and no second source quoting it was found (CCA offers out-of-band
+    verification by email: open item for the owner).
+17. **Transport bug found by a real certificate (2026-11-10):** `_DeadlineSocket.close()` closed the real socket while
+    http.client was still going to read the body of a "Connection: close" answer. Every real CRL fetch (315 KB) and about
+    8% of OCSP fetches failed with "Bad file descriptor", which surfaced as sporadic REVOCATION_UNAVAILABLE refusals (seen
+    2026-11-09 and 2026-11-10); the CRL fallback had never worked against a live server. Fixed: close is deferred while a
+    reader is open, tests model close and segmented delivery. After the fix: 40/40 live authentications, and a live
+    CRL-only run, passed.

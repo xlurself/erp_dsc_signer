@@ -11,6 +11,16 @@ issuing authority's published value, and add it to ``_ROOTS``.
 CCA India 2022 — Controller of Certifying Authorities, India (root of the India PKI).
 Source: http://www.cca.gov.in/cca/sites/default/files/files/CCAIndia2022.cer (cca.gov.in), the caIssuers
 address in SignX CA 2022. Fingerprint checked against cca.gov.in on 2026-11-09.
+
+CCA India 2022 SPL — second live root published on cca.gov.in (valid 2022-09-20 to 2042-09-20).
+Source: https://cca.gov.in/cca/sites/default/files/files/CCAIndia2022SPL.cer (page https://cca.gov.in/root_certificate.html,
+fetched 2026-11-10). Checked: self-issued, CA=true with keyCertSign, self-signature verifies. cca.gov.in does not print
+a fingerprint on that page (it offers out-of-band verification by email) and no second source quoting it was found,
+so the fingerprint is the SHA-256 of the file as served over https on that date.
+
+Roots NOT pinned on purpose (2026-11-10): CCA India 2014 (expired 2024-03-05), CCA India 2015 SPL (expired 2025-01-29),
+CCA India 2011 / 2007 / 2000-era roots (expired). An expired root validates no certificate at signing time, so pinning
+it adds attack surface and no accepted DSC. Re-check cca.gov.in/root_certificate.html when a new root is announced.
 """
 
 from __future__ import annotations
@@ -64,7 +74,39 @@ def _load(name: str, der_b64: str, expected_sha256: str) -> x509.Certificate:
 	return certificate
 
 
-_ROOTS = (("CCA India 2022", _CCA_INDIA_2022_DER_B64, CCA_INDIA_2022_SHA256),)
+CCA_INDIA_2022_SPL_SHA256 = "b724689b79b2ef9421ef8f5cc733eb093851b170ee715177005a09f226d8c91a"
+
+_CCA_INDIA_2022_SPL_DER_B64 = """
+MIIFPDCCAySgAwIBAgIQYoKBxu6+xz94CH5f9Y9J9DANBgkqhkiG9w0BAQsFADA+MQswCQYDVQQG
+EwJJTjESMBAGA1UEChMJSW5kaWEgUEtJMRswGQYDVQQDExJDQ0EgSW5kaWEgMjAyMiBTUEwwHhcN
+MjIwOTIwMDkxODE5WhcNNDIwOTIwMDkxODE5WjA+MQswCQYDVQQGEwJJTjESMBAGA1UEChMJSW5k
+aWEgUEtJMRswGQYDVQQDExJDQ0EgSW5kaWEgMjAyMiBTUEwwggIiMA0GCSqGSIb3DQEBAQUAA4IC
+DwAwggIKAoICAQDMA++VJxEXN+coznBAEf0dz+8DBj9SpEQGoehjxoDnD+WYEBAXnap2lh5yE7/w
+lpHUQ7hJ54JsqLBZQGkM0pk35bkvvcf2wAGSdK0KRilNeFDmVdduqAUJUlmNeL0ufIufsSBEusOW
+KK6VvQHxiZ0qoyoeqV+CpnDm8I2IE0WBSbaotXtGWSyBLNDCEH3lRA9GQDOZ5Utc8soR2YVwbQSi
+cGoyAC1PiPah7LY6nZCbBjc63r22dE+Cm1TGeqEb0ZUdhHl051WqEGXXmtQNfytdNP+VdKU1nrYE
+cQ5BeGMaWA5bHkO2ERldI5F55pX06hUxwjL39H6JVX5/0I+bBiPsZiCpea2gKozNBg+MBWLqyBUz
+FRVhLfdCPB6tm9EKHgrlP6rsWrjgZ5FcREmerCYs7HIYeemiI0UO4X8rqpobT3rL7mWALB2plyFa
+BdiUWW1r87eZQDEeYWavOhNITYNc31FG3Kn8DANF3IhNeYmUDzG7/M1XyGycqBmXG7tVVXezO1Gb
+gfM0SYlkVFRDOD6u9Tf0lR1MfjrJpMB+JdIJlimMM5G6LGia7+3Nlll8SJ0DhW49FdKlLB92iXuO
+ok4iwPzyFKg8Eax/9iN9TxMadYxbpKkePL9DpL/ymRvpGDkPaurqUP77smtB8Jlf7bx8SB9DWVjV
+qsgvemN+DZfNawIDAQABozYwNDAPBgNVHRMBAf8EBTADAQH/MBEGA1UdDgQKBAhIEoydvDOh6jAO
+BgNVHQ8BAf8EBAMCAQYwDQYJKoZIhvcNAQELBQADggIBADYv91JbnwU+Ih5gNzZSJY0yJkYk4tbB
+BsCZDivmZknCTbM8B9j/hEZcfXZCTbP6GCGkrxVx8aDl7E1s5DGmdO7x5R+dxrLD2B4+ORhDetlM
+Yd22mopVnzqY5UdaQ8u16JNEp/m75UqT5NvcgtE+/s1Hr+3lhWKKvN7u9PxDSIoMT/I0/sje9fWw
+jeX29nzqHTw7hYTLCIeQv8c9+wGBFAAFArUq0MaI6jxIav10DKeHptycUHwMNyzP9hh7G4nHo+lE
+IT0/jWIrjv53+aVFLdAvBKQ2jyAKd/OhuQFCue3zMVMoTQ7Zl9HZk72CkBecaZhHnEzqjpOzueCw
+eK0h27IvwED7scudpOPnY7ml6fEFdpHXZXcVz8TZbqirkHTLepfAOUBcyuadAKkOR+m5uU1UKkES
+exaY2yVEdWcVAeCM6p6FXlFeRMEebMbppkPeSFUPMRA9mhsUTOk5sbnGN2TVkSfUpcUMoQgz2bSq
+vGyR7sAZ9Un457swjwEEEnzijdMvd9YDj1wRq+tsq38zq5IaE50VMMXeBoVz2/2Bn8Mrp8kN7XIk
+rCui8wjclnG9BB1SbwjXPhE+7zE6GKh+oIRZua2RkamTpjwe+2oSihGVFeD7pSMh/Pgyxg1lxSVD
+KvbBdxNrBpot2OQN35+DkAU2exJMtUYAvzdPVx9d2elo
+"""
+
+_ROOTS = (
+	("CCA India 2022", _CCA_INDIA_2022_DER_B64, CCA_INDIA_2022_SHA256),
+	("CCA India 2022 SPL", _CCA_INDIA_2022_SPL_DER_B64, CCA_INDIA_2022_SPL_SHA256),
+)
 
 PINNED_ROOTS: tuple[x509.Certificate, ...] = tuple(_load(*entry) for entry in _ROOTS)
 PINNED_ROOT_SHA256: frozenset[str] = frozenset(expected for _name, _b64, expected in _ROOTS)
