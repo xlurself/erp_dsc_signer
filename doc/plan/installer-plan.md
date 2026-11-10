@@ -49,7 +49,7 @@ Windows alternative to evaluate later: read certificates from the Windows certif
 there), which avoids driver-path hunting but is a separate signing path.
 
 ## 5. Diagnostics and updates
-- `erp-dsc-local --doctor` (to build): prints OS, helper version, port in use, config, which driver files were found,
+- `erp-dsc-local --doctor` (built in Phase 1, see 7a): prints OS, helper version, port in use, config, which driver files were found,
   token present, the public certificate's name/issuer/expiry, and whether its CA root is pinned. No PIN, no secrets.
   A "Check my token" button in the tray icon runs it. (Token reads already run in a killable child process with a 15 s
   limit, so a hung vendor driver can no longer freeze the helper: exists today.)
@@ -71,6 +71,38 @@ never runs with more rights than the user.
 | 3 | Windows package: packaged build, startup entry, tray icon, signing, driver paths on real tokens | 4-6 days (+ a Windows machine or VM + certificate lead time) |
 | 4 | Signed-update check, uninstall, all-users/IT package, one-page admin guide | 3-4 days |
 Total about 3 to 4 working weeks for both systems, mostly spent testing on real machines and tokens.
+
+## 7a. Phase 1 as built (2026-11-10, not committed yet)
+What exists now in `local_signer/` (all commands are explicit; nothing runs by itself yet):
+- `erp-dsc-local --doctor [--config PATH]`: plain-text support report (`doctor.py`). System, helper and Python version, config
+  path and whether it loads, port free / in use / in use by this helper, how many sites are allowed (never which), log path,
+  every driver location the registry knows (found / missing) and, for each found driver, a token check through the killable
+  probe child (15 s limit): no token / driver not responding / N certificates with common name, organisation, issuer, valid-to,
+  signing yes/no and the first 8 hex of the fingerprint. Never DER, serial numbers, token serial or label, PIN. Exit 0.
+- `erp-dsc-local --find-drivers`: lists PKCS#11-looking library files in fixed folders per system (macOS `/usr/local/lib`,
+  `/opt`, `/Library`; Windows `System32`, `SysWOW64`, `Program Files*`), shallow, bounded (50 000 entries, 10 s), no symlinked
+  folders, nothing loaded (`drivers.py`).
+- `erp-dsc-local --add-module PATH [--verify]`: validates the file (absolute, plain, regular, library extension, readable, not
+  replaceable by other users) and adds it to `providers.custom_modules`, atomically, with `config.json.bak`; `--verify` asks the
+  probe child first. Never loads the library in the helper's own process.
+- Driver paths: InnaitKey `/opt/Precision_Biometric/InnaITDSC/libraries/libInnaITPKCS11Driver.dylib` (as Generic PKCS#11: the
+  ERP server accepts only its fixed provider list) and ePass `/usr/local/lib/libcastle_v2.1.0.0.dylib`.
+- Log file `<config folder>/logs/erp-dsc-local.log` (1 MB x 3 rotated, 0600 in a 0700 folder; `logs.py`): startup, shutdown,
+  signals, a failed request (route and exception class only), background-thread errors, a heartbeat every 10 minutes;
+  `faulthandler` writes fatal crashes to `erp-dsc-local-crash.log`. `erp-dsc-local --show-log-path` prints where it is.
+- `erp-dsc-local --install-autostart` / `--uninstall-autostart` (`autostart.py`): prints exactly what it will change and stops
+  unless `--yes` is given. macOS: `~/Library/LaunchAgents/com.xlurself.erp-dsc-local.plist` (RunAtLoad, KeepAlive,
+  ThrottleInterval 5, Umask 077) loaded with `launchctl bootstrap gui/<uid>`. Windows: per-user Scheduled Task "ERP DSC Signer"
+  at logon, LeastPrivilege, restart on failure, created with `schtasks /Create /XML`. Linux: not supported. Uninstall removes
+  only the entry this tool wrote.
+- The Sales Invoice page now says in plain words what to do when the helper is not running, when this computer declined the
+  site, and when the site is not yet allowed.
+
+NOT done in Phase 1: a packaged build (PyInstaller), the tray / menu-bar icon, code signing and notarisation, signed updates,
+and any run on Windows. The Windows code (task XML, driver folders, `schtasks` calls) is unit-tested with mocks on macOS
+only; nothing is proven on Windows. Task Scheduler's shortest restart interval is 1 minute (not "within seconds"), and whether
+it restarts a task whose program exits on its own must be checked on Windows (a small supervisor may be needed). The auto-start
+commands were exercised only through mocks and a dry run, never for real on a workstation.
 
 ## 8. Acceptance tests (each recorded PASS/FAIL, no PIN in the record)
 Clean Windows 10, Windows 11, Apple Silicon and Intel Mac; each token brand in the pilot; Chrome, Edge, Firefox, Safari;

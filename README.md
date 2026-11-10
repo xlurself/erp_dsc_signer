@@ -68,6 +68,29 @@ erp-dsc-local --revoke https://erp.example.com
 Origins listed in `config.json` are owned by whoever manages the workstation: they need
 no pairing and `--revoke` will not remove them. Use that to pre-approve a fleet.
 
+### Support and setup commands
+
+None of these opens a window or asks for a PIN, and none loads a token driver in the helper's
+own process. Without `--config` they use `~/.erp-dsc-local/config.json`.
+
+```bash
+erp-dsc-local --doctor                          # support report: versions, port, drivers, certificates (no secrets)
+erp-dsc-local --find-drivers                    # list token driver files in the usual folders (nothing is loaded)
+erp-dsc-local --add-module /absolute/path/libvendor-pkcs11.dylib --verify   # add a driver to config.json
+erp-dsc-local --show-log-path                   # where the log file is (logs/erp-dsc-local.log next to config.json)
+erp-dsc-local --install-autostart [--yes]       # start at every login (macOS LaunchAgent, Windows Scheduled Task)
+erp-dsc-local --uninstall-autostart [--yes]     # remove that login entry again
+```
+
+`--install-autostart` and `--uninstall-autostart` only print what they would change unless
+`--yes` is given. `--add-module` keeps the previous file as `config.json.bak`. Restart the
+signer after adding a driver.
+
+For administrators: when the page says "The ERP DSC Signer program is not running on this
+computer", run `erp-dsc-local --doctor` on that computer. It shows whether the helper is
+running, whether its port is taken by another program, and which token drivers and
+certificates it can see.
+
 ## Verification
 
 ```bash

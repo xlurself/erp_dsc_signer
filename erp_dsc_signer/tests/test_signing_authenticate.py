@@ -1235,6 +1235,96 @@ class TestSalesInvoiceJsContract(unittest.TestCase):
 				self.assertNotEqual(self.text, mutant)
 				self.assertNotEqual([], _sign_flow_problems(self._node(mutant, _SIGN_SCENARIO)))
 
+	# ---- BRD F4: what the page says when the helper is not running or the site is not allowed
+
+	def test_signer_messages_are_plain_next_steps_in_node(self):
+		self.assertEqual([], _signer_message_problems(self._node(self.text, _MESSAGE_SCENARIO)))
+
+	def test_negative_controls_signer_message_problems_are_detected(self):
+		old_offline = "The local ERP DSC Signer is not running on this computer. Start it and try again."
+		mutants = {
+			"the old offline text": self.text.replace(_OFFLINE_TEXT, old_offline, 1),
+			"jargon added": self.text.replace(_OFFLINE_TEXT, _OFFLINE_TEXT + " (port 17777)", 1),
+			"declined shows the helper's own text": self.text.replace('code === "PAIR_DENIED"', 'code === "PAIR_DENIED_X"', 1),
+			"not-allowed shows the helper's own text": self.text.replace('code === "ORIGIN_NOT_PAIRED"', 'code === "X"', 1),
+			"other helper errors are swallowed": self.text.replace("return fallback;", 'return __("Signing could not be completed.");', 1),
+			"the dialog no longer escapes": self.text.replace(
+				"message: frappe.utils.escape_html(error.message", "message: (error.message", 1
+			),
+		}
+		for label, mutant in mutants.items():
+			with self.subTest(label):
+				self.assertNotEqual(self.text, mutant)
+				self.assertNotEqual([], _signer_message_problems(self._node(mutant, _MESSAGE_SCENARIO)))
+
+
+_OFFLINE_TEXT = (
+	"The ERP DSC Signer program is not running on this computer. Open ERP DSC Signer from your menu bar or Start menu, "
+	"or restart your computer, then try Sign again. If it is not installed yet, ask your administrator to install it."
+)
+_DECLINED_TEXT = (
+	"This computer did not allow this site to use your signing token. "
+	"To sign, click Sign again and choose Allow in the ERP DSC Signer window."
+)
+_NOT_ALLOWED_TEXT = (
+	"This site is not yet allowed to use your signing token on this computer. "
+	"Click Sign again and choose Allow in the ERP DSC Signer window."
+)
+_CANCELLED_TEXT = "Signing was stopped. To sign, click Sign again, choose Yes, then choose Allow in the ERP DSC Signer window."
+_MESSAGE_JARGON = ("pkcs", "daemon", "loopback", "localhost", "127.0.0.1", "port", "origin", "cors", "http", "pair", "local signer", "middleware")
+
+_MESSAGE_SCENARIO = r"""
+(async () => {
+	const results = {};
+	const capture = async (key, fn) => { try { await fn(); results[key] = null; } catch (e) { results[key] = {message: e.message, code: e.code}; } };
+	const refuse = (code, message) => async () => ({ok: false, json: async () => ({ok: false, error: {code, message}})});
+	const base = "http://127.0.0.1:17777";
+	globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+	await capture("offline", () => local_request(base, "/v1/health", "GET"));
+	globalThis.fetch = refuse("PAIR_DENIED", "Pairing was declined on this computer.");
+	await capture("declined", () => local_request(base, "/v1/pair", "POST", {pairing_token: "t"}));
+	globalThis.fetch = refuse("ORIGIN_NOT_PAIRED", "This ERP site is not paired with the local signer on this computer.");
+	await capture("not_allowed", () => local_request(base, "/v1/providers", "GET"));
+	globalThis.fetch = refuse("TOKEN_UNAVAILABLE", "The USB token is not available.");
+	await capture("passthrough", () => local_request(base, "/v1/certificates", "POST", {}));
+	globalThis.fetch = async () => ({ok: true, json: async () => ({ok: true, paired: false})});
+	frappe.confirm = (_message, _yes, no) => no();
+	await capture("cancelled", () => ensure_paired(base));
+	const frm = {doc: {name: "SINV-TEST-0001", company: COMPANY}, reload_doc() {}};
+	globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+	await sign_with_usb(frm, 0, "auto", base);
+	globalThis.fetch = refuse("TOKEN_UNAVAILABLE", "<img src=x onerror=alert(1)>");
+	await sign_with_usb(frm, 0, "auto", base);
+	results.msgprint = calls.filter((c) => c.msgprint).map((c) => c.msgprint.message);
+	print(results);
+})();
+"""
+
+
+def _signer_message_problems(result):
+	problems = []
+	expected = {
+		"offline": (_OFFLINE_TEXT, "SIGNER_OFFLINE"),
+		"declined": (_DECLINED_TEXT, "PAIR_DENIED"),
+		"not_allowed": (_NOT_ALLOWED_TEXT, "ORIGIN_NOT_PAIRED"),
+		"cancelled": (_CANCELLED_TEXT, "PAIR_CANCELLED"),
+		"passthrough": ("The USB token is not available.", "TOKEN_UNAVAILABLE"),
+	}
+	for key, (message, code) in expected.items():
+		got = result.get(key) or {}
+		if got != {"message": message, "code": code}:
+			problems.append(f"{key}: {got!r}")
+		if key != "passthrough":
+			problems += [f"{key}: jargon {word!r}" for word in _MESSAGE_JARGON if word in str(got.get("message", "")).lower()]
+	shown = result.get("msgprint") or []
+	if len(shown) != 2:
+		return problems + [f"dialogs: {shown!r}"]
+	if shown[0] != _OFFLINE_TEXT:
+		problems.append(f"offline dialog: {shown[0]!r}")
+	if "<img" in shown[1] or "&lt;img src&#x3D;x onerror&#x3D;alert(1)&gt;" != shown[1]:
+		problems.append(f"helper text not escaped in the dialog: {shown[1]!r}")
+	return problems
+
 
 _PICKER_FUNCTIONS = ("select_local_certificate", "describe_certificate", "certificate_cards_html")
 

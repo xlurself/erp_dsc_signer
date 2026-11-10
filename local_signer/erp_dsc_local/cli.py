@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import signal
 import sys
 import threading
 import unicodedata
 from datetime import datetime, timezone
 
+from . import logs
 from .config import load_config
 from .dialog_child import UNREADABLE_CATEGORIES, _disable_core_dumps
 from .errors import ConfigurationError
+from .logs import events, exception_name
 from .origins import canonical_origin
 from .trust import TrustStore
 
@@ -92,14 +95,74 @@ def _revoke(store: TrustStore, value: str, static: frozenset[str]) -> int:
 	return 0
 
 
-def main():
+def _parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(description="Loopback USB DSC signer for ERPNext")
-	parser.add_argument("--config", help="Path to local signer JSON configuration")
+	parser.add_argument(
+		"--config",
+		help="Path to local signer JSON configuration (the support and setup commands default to "
+		"~/.erp-dsc-local/config.json)",
+	)
 	group = parser.add_mutually_exclusive_group()
 	group.add_argument("--list-origins", action="store_true", help="Show trusted ERP origins and exit")
 	group.add_argument("--allow", metavar="ORIGIN", help="Trust an ERP origin without a dialog (headless setup)")
 	group.add_argument("--revoke", metavar="ORIGIN", help="Stop trusting an ERP origin paired on this computer")
+	group.add_argument("--doctor", action="store_true", help="Print a support report (no PIN, no secrets) and exit")
+	group.add_argument(
+		"--find-drivers", action="store_true", help="List token driver files in the usual folders (nothing is loaded)"
+	)
+	group.add_argument("--add-module", metavar="PATH", help="Add a token driver file (absolute path) to config.json")
+	group.add_argument("--show-log-path", action="store_true", help="Print where the signer writes its log and exit")
+	group.add_argument(
+		"--install-autostart",
+		action="store_true",
+		help="Start the signer at every login for this user (shows the changes; add --yes to make them)",
+	)
+	group.add_argument(
+		"--uninstall-autostart",
+		action="store_true",
+		help="Remove the login entry this tool created (shows the changes; add --yes to make them)",
+	)
+	parser.add_argument("--verify", action="store_true", help="With --add-module: ask the driver first, in a separate process")
+	parser.add_argument(
+		"--yes", action="store_true", help="With --install-autostart / --uninstall-autostart: make the changes shown"
+	)
+	return parser
+
+
+def _support_command(args) -> int | None:
+	"""The support and setup commands: never open a window, never load PKCS#11 in this process."""
+	config = args.config or logs.default_config_path()
+	if args.show_log_path:
+		print(logs.log_path(config))
+		return 0
+	if args.doctor:
+		from . import doctor
+
+		return doctor.run(config)
+	if args.find_drivers or args.add_module:
+		from . import drivers
+
+		if args.find_drivers:
+			return drivers.find_drivers_command(config)
+		return drivers.add_module(config, args.add_module, verify=args.verify)
+	if args.install_autostart or args.uninstall_autostart:
+		from . import autostart
+
+		command = autostart.install if args.install_autostart else autostart.uninstall
+		return command(config, yes=args.yes)
+	return None
+
+
+def main():
+	parser = _parser()
 	args = parser.parse_args()
+	if args.verify and not args.add_module:
+		parser.error("--verify works only with --add-module")
+	if args.yes and not (args.install_autostart or args.uninstall_autostart):
+		parser.error("--yes works only with --install-autostart or --uninstall-autostart")
+	code = _support_command(args)
+	if code is not None:
+		raise SystemExit(code)
 
 	# Management commands never open a window and never load PKCS#11, so they work
 	# over SSH and on a machine with no desktop session.
@@ -118,14 +181,52 @@ def main():
 	# Before anything that can hold a PIN exists in this process.
 	_disable_core_dumps()
 
+	try:
+		config = load_config(args.config)
+	except ConfigurationError as exc:
+		parser.error(exc.message)
+	log = logs.start_daemon_log(args.config)
+
 	from .service import SignerService  # imported late: pulls in PKCS#11
 
 	try:
-		service = SignerService(load_config(args.config))
+		service = SignerService(config)
 		server = service.make_server()
 	except ConfigurationError as exc:
+		_close_log(log)
 		parser.error(exc.message)
-	_serve(service, server)
+	except OSError as exc:
+		# Most often another program, or a second signer, already listens on the port.  One
+		# line, no traceback: under launchd KeepAlive this repeats every few seconds, and the
+		# stderr file there is not size-capped like the log.
+		line = f"could not start on {config.host}:{config.port} ({exception_name(type(exc))}, errno {exc.errno})"
+		events.error("%s", line)
+		_close_log(log)
+		print(f"erp-dsc-local: {line}. Is another copy already running?", file=sys.stderr)
+		raise SystemExit(1) from None
+	version = getattr(sys.modules.get(f"{__package__}.service"), "VERSION", "unknown")
+	events.info(
+		"started: ERP DSC Signer %s on %s:%s, Python %s, %s %s",
+		version,
+		config.host,
+		config.port,
+		platform.python_version(),
+		platform.system(),
+		platform.machine(),
+	)
+	_serve(service, server, log)
+
+
+def _close_log(log) -> None:
+	if log is not None:
+		log.close()
+
+
+def _signal_name(number) -> str:
+	try:
+		return signal.Signals(number).name
+	except (ValueError, TypeError):
+		return "signal"
 
 
 def _install_signal_handlers(service, server) -> None:
@@ -137,9 +238,14 @@ def _install_signal_handlers(service, server) -> None:
 	the UI lock, and asks a NEW daemon thread to stop the server.
 	"""
 
-	def handle(_signum, _frame):
+	def stop(signum):
+		# Logged here, on the new thread, not inside the signal handler.
+		events.info("received %s, stopping", _signal_name(signum))
+		server.shutdown()
+
+	def handle(signum, _frame):
 		service.dialogs.shutdown()
-		threading.Thread(target=server.shutdown, name="erp-dsc-shutdown", daemon=True).start()
+		threading.Thread(target=stop, args=(signum,), name="erp-dsc-shutdown", daemon=True).start()
 
 	signals = [signal.SIGTERM, signal.SIGINT]
 	if hasattr(signal, "SIGHUP"):
@@ -148,14 +254,19 @@ def _install_signal_handlers(service, server) -> None:
 		signal.signal(number, handle)
 
 
-def _serve(service, server) -> None:
+def _serve(service, server, log=None) -> None:
 	"""Serve until a signal (or an error) stops the server, then always clean up."""
 	_install_signal_handlers(service, server)
 	try:
 		server.serve_forever()
+	except BaseException as exc:
+		events.error("stopped by an unexpected error (%s)", exception_name(type(exc)))
+		raise
 	finally:
 		server.server_close()
 		service.dialogs.shutdown()
+		events.info("stopped")
+		_close_log(log)
 
 
 if __name__ == "__main__":

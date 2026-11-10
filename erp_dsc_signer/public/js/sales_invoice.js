@@ -287,16 +287,28 @@ async function local_request(base_url, path, method, body) {
 	} catch (_error) {
 		// A rejected fetch means no HTTP response at all: nothing is listening.
 		throw new LocalSignerError(
-			__("The local ERP DSC Signer is not running on this computer. Start it and try again."),
+			__("The ERP DSC Signer program is not running on this computer. Open ERP DSC Signer from your menu bar or Start menu, or restart your computer, then try Sign again. If it is not installed yet, ask your administrator to install it."),
 			"SIGNER_OFFLINE"
 		);
 	}
 	const payload = await response.json().catch(() => ({}));
 	if (!response.ok || !payload.ok) {
 		const error = (payload && payload.error) || {};
-		throw new LocalSignerError(error.message || __("The local signer rejected the request."), error.code);
+		throw new LocalSignerError(plain_signer_message(error.code, error.message || __("The local signer rejected the request.")), error.code);
 	}
 	return payload;
+}
+
+// The helper's own text for these two is written for an operator; the page says what to do next.
+// Any other helper message is shown as it is (escaped by the caller).
+function plain_signer_message(code, fallback) {
+	if (code === "PAIR_DENIED") {
+		return __("This computer did not allow this site to use your signing token. To sign, click Sign again and choose Allow in the ERP DSC Signer window.");
+	}
+	if (code === "ORIGIN_NOT_PAIRED") {
+		return __("This site is not yet allowed to use your signing token on this computer. Click Sign again and choose Allow in the ERP DSC Signer window.");
+	}
+	return fallback;
 }
 
 function confirm_pairing() {
@@ -316,7 +328,7 @@ async function ensure_paired(base_url) {
 	if (health.paired) return;
 
 	if (!(await confirm_pairing())) {
-		throw new LocalSignerError(__("Pairing was cancelled."), "PAIR_CANCELLED");
+		throw new LocalSignerError(__("Signing was stopped. To sign, click Sign again, choose Yes, then choose Allow in the ERP DSC Signer window."), "PAIR_CANCELLED");
 	}
 
 	const issued = await frappe_request("erp_dsc_signer.api.pairing.issue_pairing_token", {});

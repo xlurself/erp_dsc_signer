@@ -53,6 +53,8 @@ KNOWN_PATHS = {
 			"/usr/local/lib/libcastle.dylib",
 			"/usr/local/lib/libepsng_p11.dylib",
 			"/Library/Frameworks/ePass2003.framework/Versions/Current/libcastle.dylib",
+			# ePass2003 v2 driver, found on a Mac on 2026-11-10.
+			"/usr/local/lib/libcastle_v2.1.0.0.dylib",
 		),
 		"safenet": (
 			"/usr/local/lib/libeTPkcs11.dylib",
@@ -70,6 +72,10 @@ KNOWN_PATHS = {
 		"generic_pkcs11": (
 			"/Library/OpenSC/lib/opensc-pkcs11.so",
 			"/usr/local/lib/opensc-pkcs11.so",
+			# InnaitKey (Precision Biometric), proven on macOS 2026-11-10.  Listed under the
+			# generic id: the ERP accepts only its fixed provider list (api/signing.py
+			# USB_PROVIDERS), and "auto" offers every installed module anyway.
+			"/opt/Precision_Biometric/InnaITDSC/libraries/libInnaITPKCS11Driver.dylib",
 		),
 	},
 	"Linux": {

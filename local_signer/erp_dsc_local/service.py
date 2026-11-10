@@ -62,6 +62,7 @@ from .errors import (
 	TokenBusy,
 	TokenUnavailable,
 )
+from .logs import log_handler_failure, log_request_failure
 from .nonces import NonceStore
 from .origins import try_canonical_origin
 from .pairing import PairGuard, consent_dialog, verify_pairing_proof
@@ -449,6 +450,7 @@ class _SignerHTTPServer(ThreadingHTTPServer):
 			sys.stderr.flush()
 		except Exception:
 			pass
+		log_handler_failure()  # the log file: the exception's class name only
 
 
 class SignerService:
@@ -624,6 +626,7 @@ class SignerService:
 					else:
 						self._respond(204, {}, None)
 				except Exception:
+					log_request_failure("OPTIONS", self.path)
 					self._respond(204, {}, None)
 
 			def do_GET(self):
@@ -638,6 +641,7 @@ class SignerService:
 				except LocalSignerError as exc:
 					self._error(exc)
 				except Exception:
+					log_request_failure("GET", self.path)
 					self._error(_internal_error())
 
 			def do_POST(self):
@@ -662,6 +666,7 @@ class SignerService:
 				except LocalSignerError as exc:
 					self._error(exc)
 				except Exception:
+					log_request_failure("POST", self.path)
 					self._error(_internal_error())
 
 			# --------------------------------------------------------- endpoints
