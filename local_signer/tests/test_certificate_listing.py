@@ -301,7 +301,11 @@ class TestOnlySigningCertificatesAreOffered(ListingTestCase):
 			"digitalSignature only": (_der("Test Signer DS", ca=False, usage="ds"), True),
 			"leaf without BasicConstraints": (_der("Test Signer No BC"), True),
 			"keyEncipherment only": (_der("Test Signer Encryption", ca=False, usage="encrypt"), False),
-			"no KeyUsage at all": (_der("Test Signer No KU", ca=False, usage="none"), False),
+			# R2 MEDIUM: absent KeyUsage = unrestricted, as on the server (was False before).
+			"no KeyUsage at all": (_der("Test Signer No KU", ca=False, usage="none"), True),
+			"no KeyUsage, no BasicConstraints": (_der("Test Signer Bare", usage="none"), True),
+			"no KeyUsage but a CA": (_der("Test CA No KU", ca=True, usage="none"), False),
+			"no KeyUsage but self-issued": (_der("Test Self No KU", ca=False, usage="none", self_issued=True), False),
 			"CA with signing usage": (_der("Test Signing CA", ca=True, usage="sign"), False),
 			"sub-CA": (_der("Test Sub-CA", issuer="Test CA", ca=True, usage="ca"), False),
 			"self-issued root": (_der("Test Root", ca=True, usage="ca", self_issued=True), False),
@@ -310,6 +314,13 @@ class TestOnlySigningCertificatesAreOffered(ListingTestCase):
 		for label, (der, expected) in cases.items():
 			with self.subTest(label):
 				self.assertIs(expected, is_signing_certificate(x509.load_der_x509_certificate(der)))
+
+	def test_a_leaf_without_key_usage_is_offered_and_an_encryption_leaf_is_not(self):
+		# R2 MEDIUM: the server accepts an absent KeyUsage, so the picker must not hide such a DSC.
+		no_ku = _token_cert(_der("Test Signer No KU", ca=False, usage="none"))
+		encryption = _token_cert(_der("Test Signer Encryption", ca=False, usage="encrypt"))
+		self.use({WD.id: [encryption, no_ku], INNAIT.id: TokenUnavailable()})
+		self.assertEqual(["Test Signer No KU"], [item["common_name"] for item in self.listing()])
 
 	def test_flags_supplied_with_the_metadata_are_not_trusted(self):
 		lying = _token_cert(_der("Test Sub-CA", issuer="Test CA", ca=True, usage="ca"), metadata_extra={"digital_signature": True})

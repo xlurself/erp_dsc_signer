@@ -1,6 +1,6 @@
 # Spec 002 — Authenticate the DSC against the CCA India hierarchy (fail closed)
 
-BRD: doc/brd/002-india-ca-verification.md (owner-approved 2026-11-09). Rev 2 (as built, before panel; section 9 lists every change from rev 1).
+BRD: doc/brd/002-india-ca-verification.md (owner-approved 2026-11-09). Rev 2 (as built, before panel; section 9 lists every change from rev 1). Rev 3 (2026-11-10): s9 item 18, own path validator instead of the TLS verifier.
 Owner rules: not authenticated by the Indian CA chain => do NOT sign, no override (decision 2026-11-09).
 Scope: certificate authentication only. PIN/key/dialog handling (F1) is unchanged. No secret is involved at any step:
 only the PUBLIC certificate, public CA certificates and public revocation data are handled.
@@ -35,6 +35,7 @@ at authenticate shows the reason and stops BEFORE the PIN dialog; the token is n
    the pinned roots (`pinned_roots.py`: the CCA India 2022 DER embedded, verified at import against its fingerprint
    constant; code fails to import on mismatch). OS/certifi stores are never used. Intermediates come from AIA (3).
    CA flag, pathlen, key-usage keyCertSign and signature at every link are enforced by the library.
+   **Superseded (rev 3, s9 item 18):** the library verifier is no longer used; `ca_trust._validate_path` enforces these.
 2. Validity: now within notBefore/notAfter for every cert in the chain; leaf keyUsage digitalSignature or
    contentCommitment (existing rule kept). Time = server clock at verification (no trusted timestamp in this
    release; the record states "signing time is the server clock at verification").
@@ -103,6 +104,7 @@ Python `x509.verification` API (needs cryptography >= 42; confirm bench env vers
    only; every CA/OCSP/CRL answer is verified cryptographically regardless of transport.
 4. **Library limits (cryptography 44):** the leaf must carry a SAN, and clientAuth if it has an EKU (the owner's does).
    A CCA DSC without them is refused (new 8th closed reason code `CERTIFICATE_PROFILE`, detected before chain building, honest message "not rejected as untrusted"): fail closed, relaxable by a library upgrade. `KEY_USAGE` now means a real digitalSignature/non-repudiation problem only.
+   **Superseded (rev 3, item 18):** no SAN or clientAuth is required any more; `CERTIFICATE_PROFILE` now means the leaf itself is unacceptable.
 5. **Revocation details:** a correctly signed OCSP `revoked` refuses even if stale; OCSP without `nextUpdate` counts as
    stale and falls to the CRL; RSA-PSS-signed OCSP, delta/indirect/partitioned CRLs and PKCS#7 AIA files are not
    supported (fall back / refuse). OCSP size cap 64 KB; DNS lookup has no timeout of its own (the 25 s budget applies).
@@ -150,3 +152,39 @@ Python `x509.verification` API (needs cryptography >= 42; confirm bench env vers
     2026-11-09 and 2026-11-10); the CRL fallback had never worked against a live server. Fixed: close is deferred while a
     reader is open, tests model close and segmented delivery. After the fix: 40/40 live authentications, and a live
     CRL-only run, passed.
+18. **Path validator replaces the TLS verifier (rev 3, 2026-11-10, panel round F2-INDIA-CA-VERIFY-R2).** cryptography's
+    `x509.verification` client verifier is a TLS profile: it refused a leaf without a SAN, or with an EKU lacking clientAuth,
+    which a CMS/PDF signing DSC does not need (owner rule: any valid CCA-hierarchy DSC, any brand). It is no longer used.
+    `ca_trust._validate_path` (RFC 5280 s6.1 basic path validation, document-signing profile) decides the path that
+    `_build_path` assembled (leaf -> AIA intermediates -> pinned root). All checks fail closed:
+    - path ends at a pinned root, matched by DER SHA-256 (never a root from AIA); 2..`MAX_INTERMEDIATES`+2 certificates,
+      no certificate repeated (else `CHAIN_INCOMPLETE`);
+    - leaf, before any download: valid at `now`; keyUsage absent = unrestricted, present must have digitalSignature or
+      nonRepudiation (`KEY_USAGE`); not self-issued (`NOT_CCA_TRUSTED`); v3, basicConstraints absent or cA=false, strong key
+      and signature, no unhandled critical extension (`CERTIFICATE_PROFILE`). **No SAN and no EKU gate**: absent,
+      documentSigning, Adobe, emailProtection, anyExtendedKeyUsage all pass (no CCA rule lets an EKU refusal reject only
+      certificates a real CCA CA never issues);
+    - every certificate valid at `now`, inclusive at both edges (`EXPIRED_OR_NOT_YET_VALID`);
+    - every CA, the pinned root included: v3, basicConstraints cA=true, pathLenConstraint >= number of CAs below it
+      (self-issued ones counted too, stricter than RFC), keyCertSign when keyUsage is present (RFC 5280 s6.1.4(n)), strong
+      key, no unhandled critical extension, no nameConstraints (not implemented: refused even when non-critical)
+      (`NOT_CCA_TRUSTED`);
+    - every link: issuer name DER-equal to the issuer's subject (RFC 5280 s4.1.2.4; x509.Name equality would ignore the
+      string type), signature hash SHA-2/SHA-3 only (no MD2/MD5/SHA-1), signature verified with the issuer's key
+      (`NOT_CCA_TRUSTED`);
+    - strong key: RSA >= 2048 or EC P-256/P-384/P-521; DSA/Ed25519/Ed448/other curves refused;
+    - critical extensions handled: basicConstraints, keyUsage, EKU, SAN, certificatePolicies, AKI, SKI, CRL DP, AIA,
+      policyConstraints, inhibitAnyPolicy. No policy tree is built: certificatePolicies, inhibitAnyPolicy and
+      inhibitPolicyMapping cannot change the verdict while no explicit policy is required, so any requireExplicitPolicy
+      in the path is refused. The old library refused critical certificatePolicies/policyConstraints/inhibitAnyPolicy
+      (probed on cryptography 44), so nothing it accepted is refused now except as listed here.
+    Reason codes: the closed set is unchanged (8); the `CERTIFICATE_PROFILE` message now names the leaf problems. Revocation
+    (OCSP then CRL, every non-root certificate), SSRF guard and budgets are unchanged. The daemon's certificate filter
+    (`local_signer/erp_dsc_local/certificates.py::is_signing_certificate`) now treats an absent keyUsage as unrestricted,
+    like the server, so the picker no longer hides such a DSC. Tests: `test_ca_trust.SigningPathValidatorTest`, the real
+    SignX/CCA certificates through `_validate_path` with only the leaf link stubbed (`RealCCAChainTest`), 21 ca_trust
+    mutants + 2 daemon mutants all killed. Live (2026-11-10, real HttpTransport): the organisation and the personal
+    SignX DSC each verified 5/5 (2 AIA + 3 OCSP calls per run). Residuals: nameConstraints and requireExplicitPolicy are
+    refused, not implemented; non-critical policyMappings is ignored (RFC 6.1.4(a) anyPolicy check not done; it cannot
+    widen trust, which comes only from the pinned roots and the verified links); names that RFC 5280 s7.1 would match
+    after normalisation but that are encoded differently are refused.

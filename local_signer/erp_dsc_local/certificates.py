@@ -187,12 +187,15 @@ def _organization(name) -> str:
 
 
 def is_signing_certificate(certificate) -> bool:
-	"""True only for an end-entity certificate whose own KeyUsage allows signing.
+	"""True only for an end-entity certificate whose own KeyUsage, if any, allows signing.
 
 	Read from the parsed certificate, never from a driver attribute or a metadata flag.
 	Not a signing certificate: a CA (BasicConstraints cA true), a self-issued certificate
-	(a root), and one without digitalSignature or nonRepudiation, including one with no
-	KeyUsage extension at all.  A certificate whose extensions cannot be read is not one.
+	(a root), and one whose KeyUsage is present without digitalSignature or nonRepudiation.
+	No KeyUsage extension means unrestricted (RFC 5280 s4.2.1.3), the same rule the server
+	applies (ca_trust._require_signing_usage, usb_signer._validate_certificate), so the
+	picker never hides a certificate the server would accept.  A certificate whose
+	extensions cannot be read is not one.
 	"""
 	try:
 		from cryptography import x509
@@ -205,7 +208,10 @@ def is_signing_certificate(certificate) -> bool:
 				return False
 		except x509.ExtensionNotFound:
 			pass
-		usage = extensions.get_extension_for_class(x509.KeyUsage).value
+		try:
+			usage = extensions.get_extension_for_class(x509.KeyUsage).value
+		except x509.ExtensionNotFound:
+			return True
 		return bool(usage.digital_signature or usage.content_commitment)
 	except Exception:
 		return False

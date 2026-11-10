@@ -20,7 +20,7 @@ Each row needs a recorded PASS/FAIL with date and tester. PINs are never recorde
 - [ ] A2 `DSC Signing Settings` set (USB method; timestamp off until a TSA is chosen).
 - [ ] A3 Cloud server can reach the 5 CCA/SignX hosts: run `authenticate_certificate` on the cloud with the public leaf fixture, expect `verified`.
 - [ ] A4 Site origin (https) added to the laptop daemon's allowed origins (via pairing dialog).
-- [ ] A5 Existing `custom_signed_*` fields `allow_on_submit` decision (open owner item).
+- [ ] A5 Confirm on the cloud site that all six fixture fields (`custom_digital_signature_section`, `custom_digitally_signed`, `custom_signed_invoice_pdf`, `custom_signed_on`, `custom_signed_by`, `custom_signature_verification`) have `allow_on_submit` = 0 after `bench migrate` (owner decision 2026-11-10, spec 002 s9 item 15: decided, not open).
 
 ### B. Laptop (repeat on: clean Windows 11, clean Windows 10, one macOS)
 - [ ] B1 Install daemon with the installer (section 3); it starts at login; health answers on 127.0.0.1:17777.
@@ -30,7 +30,7 @@ Each row needs a recorded PASS/FAIL with date and tester. PINs are never recorde
 - [ ] B5 Token read: public certificate listed without PIN.
 
 ### C. Signing, per token brand (WatchData/ProxKey, InnaitKey, ePass, SafeNet)
-- [ ] C1 Certificate chain authenticates (note which CCA root: 2022 only is pinned today).
+- [ ] C1 Certificate chain authenticates (note which CCA root it reached: both live roots, CCA India 2022 and CCA India 2022 SPL, are pinned; the expired 2014 / 2015 SPL / 2011 / 2007 roots are deliberately not pinned, spec 002 s9 item 16). A DSC without a SAN or without TLS clientAuth must also authenticate (spec 002 s9 item 18).
 - [ ] C2 Authentication happens BEFORE the PIN dialog; failure shows a refusal and no PIN dialog.
 - [ ] C3 Wrong PIN, final-try warning, cancel, timeout: each ends cleanly, no signed file.
 - [ ] C4 Signed PDF: Adobe Reader shows signature valid, signer = certificate holder, stamp "Digitally signed by <holder>" (stamp fix 2026-11-10, retest pending).
@@ -60,7 +60,7 @@ Goal: a user installs once, with no Python knowledge and (where possible) no adm
 Rough order: 8 and 7 first (small, testable on this Mac), then 1-4 per OS, then 5-6.
 
 ## 4. Open decisions for the owner
-1. Which CCA roots to pin besides CCA India 2022 (each is a fingerprint taken from cca.gov.in).
+1. CCA roots: decided 2026-11-10, both live roots (CCA India 2022 and 2022 SPL) are pinned, expired ones are not (spec 002 s9 item 16). Still open: out-of-band confirmation of the 2022 SPL fingerprint with CCA (the site prints no fingerprint).
 2. Windows first or macOS first for the pilot; which token brands are in the pilot.
 3. Who buys the code-signing certificates (Windows Authenticode, Apple Developer ID).
 4. PFX/server-side signing: keep out of the client demo, or decide where its password lives.

@@ -201,7 +201,12 @@ function certificate_cards_html(cards, preselected) {
 		);
 	});
 	const help = __("Pick the certificate that should appear as the signer on this invoice. For company invoices choose the one in your company's name.");
-	return `<p class="text-muted">${escape(help)}</p>${items.join("")}`;
+	// One radio group: a fieldset whose legend names it, so screen readers announce it (WCAG 1.3.1).
+	return (
+		`<fieldset style="border: 0; margin: 0; padding: 0; min-width: 0;">` +
+		`<legend class="text-muted" style="font-size: inherit; border: 0; margin-bottom: 10px; width: auto;">${escape(help)}</legend>` +
+		`${items.join("")}</fieldset>`
+	);
 }
 
 // Certificate fields come from the token: shown as plain text only, with control and

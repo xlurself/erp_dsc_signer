@@ -1196,6 +1196,12 @@ class TestSalesInvoiceJsContract(unittest.TestCase):
 				'const personal = !organization || organization.toLowerCase() === "personal";', "const personal = !organization;", 1
 			),
 			"no amber hint": self.text.replace(": {tone: \"amber\"", ": null && {tone: \"amber\"", 1),
+			"no fieldset/legend (WCAG 1.3.1)": self.text.replace(
+				'`<legend class="text-muted" style="font-size: inherit; border: 0; margin-bottom: 10px; width: auto;">${escape(help)}</legend>` +',
+				'`<p class="text-muted">${escape(help)}</p>` +',
+				1,
+			),
+			"legend not escaped": self.text.replace("width: auto;\">${escape(help)}</legend>", "width: auto;\">${help}</legend>", 1),
 		}
 		for label, mutant in mutants.items():
 			with self.subTest(label):
@@ -1367,6 +1373,15 @@ def _picker_card_problems(result):
 		problems.append("the hostile common name is not shown escaped")
 	if re.findall(r'value="([^"]*)"', html) != ["0", "1", "2"]:
 		problems.append("radio values are not list positions")
+	# WCAG 1.3.1: every radio sits in ONE fieldset whose first child is a legend naming the group.
+	group = re.fullmatch(r"<fieldset[^>]*><legend[^>]*>([^<]+)</legend>(.*)</fieldset>", html, re.S)
+	if group is None:
+		problems.append("the radios are not one fieldset with a legend first")
+	else:
+		if group.group(1) != "Pick the certificate that should appear as the signer on this invoice. For company invoices choose the one in your company&#39;s name.":
+			problems.append(f"legend text: {group.group(1)!r}")
+		if group.group(2).count('type="radio"') != 3 or "<fieldset" in group.group(2) or "<legend" in group.group(2):
+			problems.append("the radios are not all inside the single fieldset")
 	for value in result["hex"]:
 		if value.lower() in visible.lower():
 			problems.append("a fingerprint or serial is visible")

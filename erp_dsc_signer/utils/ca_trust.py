@@ -5,9 +5,10 @@ through an injectable ``fetch`` callable; every URL is checked by :func:`url_all
 called, and the default transport (:class:`HttpTransport`) also refuses non-public addresses and redirects.
 
 Trust comes only from ``pinned_roots``. Certificates downloaded from AIA addresses are candidates, never
-anchors: they count only when cryptography's ``x509.verification`` builds a path from the leaf to a pinned
-root. Revocation is checked for every non-root certificate in that path, OCSP first and CRL as fallback;
-a status that cannot be confirmed refuses (fail closed, never "assume good").
+anchors: they count only when :func:`_validate_path` accepts the whole path from the leaf to a pinned root
+(RFC 5280 basic path validation with a document-signing profile: no TLS rule such as a required SAN or
+clientAuth purpose). Revocation is checked for every non-root certificate in that path, OCSP first and CRL
+as fallback; a status that cannot be confirmed refuses (fail closed, never "assume good").
 
 A failure raises :class:`CertificateNotAuthenticated` with a reason code from a closed set and a fixed
 plain-language message. Library exception text never reaches the message, the attributes or the exception
@@ -33,8 +34,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.x509 import ocsp
-from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
-from cryptography.x509.verification import PolicyBuilder, Store
+from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, ExtensionOID, NameOID
 
 from erp_dsc_signer.utils import pinned_roots
 
@@ -63,11 +63,11 @@ MESSAGES = {
 		"Could not download the issuing certifying authority's certificate, so the document was not signed. "
 		"Check the internet connection and try again."
 	),
-	# Not a trust verdict: cryptography 44's client verifier cannot evaluate a leaf without these fields.
+	# The signer certificate itself is not an acceptable signing certificate (checked before any download).
 	"CERTIFICATE_PROFILE": (
-		"This certificate does not carry the fields this verifier requires (subject alternative name and a "
-		"client-authentication purpose), so the document was not signed. It was not rejected as untrusted; "
-		"please contact support."
+		"This certificate cannot be used to sign documents: it is a certifying-authority certificate, uses a weak "
+		"algorithm or key, or carries a critical extension this verifier does not support, so the document was "
+		"not signed. Please contact support."
 	),
 }
 REASON_CODES = frozenset(MESSAGES)
@@ -92,7 +92,7 @@ RECORD_KEYS = ("verified", "checked_at", "chain", "root_sha256", "revocation", "
 
 _monotonic = time.monotonic
 # Intermediates that verified to a pinned root, keyed by SHA-256 (public data; saves AIA downloads only:
-# a cached certificate is still re-verified by the library on every call).
+# a cached certificate is still re-validated by _validate_path on every call).
 _INTERMEDIATE_CACHE: dict[str, x509.Certificate] = {}
 
 _HOSTNAME = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
@@ -151,15 +151,15 @@ def authenticate_certificate(cert_der, *, now, fetch=None, roots=None, extra_hos
 
 def _authenticate(cert_der, now, anchors, net, stage):
 	leaf = x509.load_der_x509_certificate(bytes(cert_der))
+	# The signer certificate on its own, before any download.
 	_require_valid_at(leaf, now)
 	_require_signing_usage(leaf)
-	_require_verifier_profile(leaf)
+	_require_leaf_profile(leaf)
 	stage[0] = "CHAIN_INCOMPLETE"
 	intermediates, anchor = _build_path(leaf, anchors, net)
-	for cert in (*intermediates, anchor):
-		_require_valid_at(cert, now)
+	chain = [leaf, *intermediates, anchor]
 	stage[0] = "NOT_CCA_TRUSTED"
-	chain = _verify_path(leaf, intermediates, anchors, now)
+	_validate_path(chain, anchors, now)  # validity of every CA is checked first there (EXPIRED_OR_NOT_YET_VALID)
 	_remember(chain[1:-1])
 	stage[0] = "REVOCATION_UNAVAILABLE"
 	revocation = [_revocation_status(chain[i], chain[i + 1], now, net) for i in range(len(chain) - 1)]
@@ -189,16 +189,23 @@ def _require_signing_usage(leaf):
 		raise CertificateNotAuthenticated("KEY_USAGE")
 
 
-def _require_verifier_profile(leaf):
-	"""cryptography 44's client verifier needs a SAN, and clientAuth when an EKU is present.
+def _require_leaf_profile(leaf):
+	"""The signer certificate itself: an end entity, v3, strong key and signature, no critical extension we skip.
 
-	Checked before any chain building or fetch, so a genuine CCA DSC without them is reported as what it
-	is (CERTIFICATE_PROFILE), never as untrusted (NOT_CCA_TRUSTED) or as a key-usage problem.
+	A CMS/PDF signing certificate needs no SAN and no TLS clientAuth purpose, so neither is required, and the
+	EKU is not a gate at all (absent, documentSigning, emailProtection, anyExtendedKeyUsage: all accepted):
+	no CCA rule is known that would let an EKU refusal reject only certificates a real CCA CA never issues.
 	"""
-	if _extension(leaf, x509.SubjectAlternativeName) is None:
-		raise CertificateNotAuthenticated("CERTIFICATE_PROFILE")
-	extended = _extension(leaf, x509.ExtendedKeyUsage)
-	if extended is not None and ExtendedKeyUsageOID.CLIENT_AUTH not in list(extended):
+	if leaf.subject == leaf.issuer:
+		raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")  # self-issued: its own root, never a CCA leaf
+	constraints = _extension(leaf, x509.BasicConstraints)
+	if (
+		leaf.version != x509.Version.v3
+		or (constraints is not None and constraints.ca)
+		or not _extensions_understood(leaf, is_ca=False)
+		or not _strong_key(leaf.public_key())
+		or not _strong_signature(leaf)
+	):
 		raise CertificateNotAuthenticated("CERTIFICATE_PROFILE")
 
 
@@ -263,13 +270,127 @@ def _fetch_issuer(cert, net):
 	raise CertificateNotAuthenticated("CHAIN_INCOMPLETE" if mismatched else "CA_FETCH_FAILED")
 
 
-def _verify_path(leaf, intermediates, anchors, now):
-	"""The library decides: CA flag, pathlen, keyCertSign, validity and the signature of every link."""
-	verifier = PolicyBuilder().store(Store(list(anchors))).time(now).build_client_verifier()
-	chain = list(verifier.verify(leaf, list(intermediates)).chain)
-	if _sha256(chain[-1]) not in {_sha256(anchor) for anchor in anchors}:
+# ---------------------------------------------------------------- path validation (spec 002 s9 item 18)
+
+# Extensions this validator understands. Any other extension marked critical refuses (RFC 5280 s4.2).
+# certificatePolicies, inhibitAnyPolicy and policyConstraints' inhibitPolicyMapping only shape the RFC 5280
+# policy tree, and that tree cannot change the verdict while no explicit policy is required; a
+# requireExplicitPolicy anywhere in the path is therefore refused (_extensions_understood). nameConstraints is
+# not implemented, so a CA that carries it is refused rather than having its constraints ignored.
+_UNDERSTOOD_EXTENSIONS = frozenset(
+	{
+		ExtensionOID.BASIC_CONSTRAINTS,
+		ExtensionOID.KEY_USAGE,
+		ExtensionOID.EXTENDED_KEY_USAGE,
+		ExtensionOID.SUBJECT_ALTERNATIVE_NAME,
+		ExtensionOID.CERTIFICATE_POLICIES,
+		ExtensionOID.AUTHORITY_KEY_IDENTIFIER,
+		ExtensionOID.SUBJECT_KEY_IDENTIFIER,
+		ExtensionOID.CRL_DISTRIBUTION_POINTS,
+		ExtensionOID.AUTHORITY_INFORMATION_ACCESS,
+		ExtensionOID.POLICY_CONSTRAINTS,
+		ExtensionOID.INHIBIT_ANY_POLICY,
+	}
+)
+# Certificate signature hashes accepted on every link: SHA-2 and SHA-3 only (no MD2, MD5 or SHA-1).
+_STRONG_HASHES = (
+	hashes.SHA224,
+	hashes.SHA256,
+	hashes.SHA384,
+	hashes.SHA512,
+	hashes.SHA512_224,
+	hashes.SHA512_256,
+	hashes.SHA3_224,
+	hashes.SHA3_256,
+	hashes.SHA3_384,
+	hashes.SHA3_512,
+)
+MIN_RSA_BITS = 2048
+_STRONG_CURVES = (ec.SECP256R1, ec.SECP384R1, ec.SECP521R1)
+
+
+def _validate_path(chain, anchors, now):
+	"""Decide the path leaf -> intermediates -> pinned root; raise CertificateNotAuthenticated on any failure.
+
+	RFC 5280 s6.1 basic path validation with a document-signing profile. It replaces cryptography's
+	x509.verification client verifier, a TLS profile that demanded a SAN and clientAuth a CMS/PDF signing
+	certificate does not need. Checks: the last certificate is a pinned root by DER; no repeated certificate
+	and at most MAX_INTERMEDIATES intermediates; the leaf profile (KEY_USAGE, CERTIFICATE_PROFILE); every
+	certificate valid at ``now``; every CA (the root included): cA, pathLenConstraint, keyCertSign when
+	keyUsage is present, understood critical extensions, strong key; every link: issuer name encoded exactly
+	as the issuer's subject, strong signature hash, and the issuer's key verifies the signature.
+	"""
+	if not 2 <= len(chain) <= MAX_INTERMEDIATES + 2:
+		raise CertificateNotAuthenticated("CHAIN_INCOMPLETE")
+	fingerprints = [_sha256(cert) for cert in chain]
+	if len(set(fingerprints)) != len(fingerprints):
+		raise CertificateNotAuthenticated("CHAIN_INCOMPLETE")  # a loop or a repeated certificate
+	if fingerprints[-1] not in {_sha256(anchor) for anchor in anchors}:
+		raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")  # the path must end at a pinned root, never a fetched one
+	_require_signing_usage(chain[0])
+	_require_leaf_profile(chain[0])
+	for cert in chain:
+		_require_valid_at(cert, now)
+	for position in range(1, len(chain)):
+		_require_issuing_ca(chain[position], position - 1)
+		_require_link(chain[position - 1], chain[position])
+
+
+def _require_issuing_ca(cert, intermediates_below):
+	"""``cert`` issues certificates: cA, pathLen (CAs between it and the leaf), keyCertSign, extensions, key."""
+	constraints = _extension(cert, x509.BasicConstraints)
+	key_usage = _extension(cert, x509.KeyUsage)
+	if (
+		cert.version != x509.Version.v3
+		or constraints is None
+		or not constraints.ca
+		or (constraints.path_length is not None and intermediates_below > constraints.path_length)
+		or (key_usage is not None and not key_usage.key_cert_sign)
+		or not _extensions_understood(cert, is_ca=True)
+		or not _strong_key(cert.public_key())
+	):
 		raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")
-	return chain
+
+
+def _require_link(cert, issuer):
+	"""``issuer`` issued ``cert``: same encoded name, strong signature hash, and the signature verifies.
+
+	Names are compared as their DER encoding, never as text: RFC 5280 s4.1.2.4 requires a CA to encode the
+	issuer field exactly as its own subject, and cryptography's issuer check is DER-strict as well
+	(x509.Name equality alone ignores the ASN.1 string type).
+	"""
+	if (
+		cert.issuer.public_bytes() != issuer.subject.public_bytes()
+		or not _strong_signature(cert)
+		or not _directly_issued(cert, issuer)
+	):
+		raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")
+
+
+def _extensions_understood(cert, *, is_ca):
+	for extension in cert.extensions:
+		if extension.critical and extension.oid not in _UNDERSTOOD_EXTENSIONS:
+			return False
+	if is_ca and _extension(cert, x509.NameConstraints) is not None:
+		return False  # not implemented: refused whether or not it is marked critical
+	policy = _extension(cert, x509.PolicyConstraints)
+	return policy is None or policy.require_explicit_policy is None
+
+
+def _strong_key(public_key):
+	if isinstance(public_key, rsa.RSAPublicKey):
+		return public_key.key_size >= MIN_RSA_BITS
+	if isinstance(public_key, ec.EllipticCurvePublicKey):
+		return isinstance(public_key.curve, _STRONG_CURVES)
+	return False  # DSA, Ed25519, Ed448 and anything else: not used by CCA India, refused
+
+
+def _strong_signature(cert):
+	try:
+		algorithm = cert.signature_hash_algorithm
+	except Exception:
+		return False  # MD2 and other algorithms the library cannot even name
+	return isinstance(algorithm, _STRONG_HASHES)
 
 
 def _remember(certs):

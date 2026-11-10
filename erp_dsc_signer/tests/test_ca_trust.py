@@ -5,8 +5,8 @@ and the default HTTP transport is exercised only with a fake resolver and a fake
 A generated test PKI (pinned through the explicit ``roots=`` argument) covers every negative case.
 A generated SignX-shaped chain whose leaf copies a real SignX Class 3 Individual DSC's profile
 (tests/_test_pki.py, no personal data) runs end to end. The real CCA India 2022 root and the real,
-public SignX intermediates (tests/fixtures/) are checked link by link; no real end-entity
-certificate is committed, so the library path verifier is never run over the real chain.
+public SignX intermediates (tests/fixtures/) run through the path validator (ca_trust._validate_path)
+with only the leaf link stubbed: no real end-entity certificate is committed.
 """
 
 import ast
@@ -20,15 +20,15 @@ import os
 import re
 import socket
 import traceback
+import types
 import unittest
 from unittest import mock
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509 import ocsp
 from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
-from cryptography.x509.verification import VerificationError
 
 from erp_dsc_signer.tests import _test_pki
 from erp_dsc_signer.utils import ca_trust, pinned_roots
@@ -461,34 +461,36 @@ class ChainTrustTest(_Base):
 				net.routes[MAIN.u["sub_cer"]] = body
 				self.assertRefused("CA_FETCH_FAILED", leaf, net)
 
-	def test_store_holds_only_the_given_roots(self):
+	def test_path_validator_gets_only_the_given_roots_and_ends_at_one(self):
 		seen = []
-		real_store = ca_trust.Store
+		real_validate = ca_trust._validate_path
 
-		def spy(certs):
-			seen.append(list(certs))
-			return real_store(certs)
+		def spy(chain, anchors, now):
+			seen.append(([sha(c) for c in chain], [sha(c) for c in anchors]))
+			return real_validate(chain, anchors, now)
 
 		leaf = MAIN.leaf()
-		with mock.patch.object(ca_trust, "Store", side_effect=spy):
+		with mock.patch.object(ca_trust, "_validate_path", side_effect=spy):
 			self.assertPasses(leaf, world(MAIN, leaf))
-		self.assertEqual(len(seen), 1)
-		self.assertEqual([sha(c) for c in seen[0]], [sha(MAIN.root)])
+		self.assertEqual(seen, [([sha(leaf), sha(MAIN.sub), sha(MAIN.ca), sha(MAIN.root)], [sha(MAIN.root)])])
 
 	def test_default_roots_are_the_pinned_roots(self):
+		# The anchors consulted while building the path are exactly the two pinned CCA India roots.
+		# (The previous form spied on a library Store that a refused path never reached: vacuous.)
 		seen = []
-		real_store = ca_trust.Store
+		real_anchor = ca_trust._issuing_anchor
 
-		def spy(certs):
-			seen.append([sha(c) for c in certs])
-			return real_store(certs)
+		def spy(cert, anchors):
+			seen.append([sha(c) for c in anchors])
+			return real_anchor(cert, anchors)
 
 		leaf = MAIN.leaf()
-		with mock.patch.object(ca_trust, "Store", side_effect=spy):
+		with mock.patch.object(ca_trust, "_issuing_anchor", side_effect=spy):
 			with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
 				ca_trust.authenticate_certificate(der(leaf), now=NOW, fetch=world(MAIN, leaf))
 		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
-		self.assertTrue(all(s == [CCA_ROOT_SHA256] for s in seen))
+		self.assertTrue(seen)
+		self.assertTrue(all(s == [CCA_ROOT_SHA256, CCA_SPL_ROOT_SHA256] for s in seen), seen)
 
 	def test_verified_intermediates_are_cached(self):
 		leaf = MAIN.leaf()
@@ -528,32 +530,30 @@ class ValidityAndKeyUsageTest(_Base):
 		self.assertRefused("KEY_USAGE", leaf, net)
 		self.assertEqual(net.calls, [])
 
-	def test_leaf_eku_without_client_auth_is_a_profile_refusal_before_any_fetch(self):
-		# cryptography 44's client verifier needs clientAuth when an EKU is present: that is a verifier
-		# requirement, not a usage or trust problem, so it gets its own honest reason (finding 2).
-		leaf = MAIN.leaf(eku=(EMAIL,))
-		net = world(MAIN, leaf)
-		self.assertRefused("CERTIFICATE_PROFILE", leaf, net)
-		self.assertEqual(net.calls, [])
-
-	def test_leaf_without_san_is_a_profile_refusal_not_untrusted(self):
-		leaf = MAIN.leaf(san=False)
-		net = world(MAIN, leaf)
-		self.assertRefused("CERTIFICATE_PROFILE", leaf, net)
-		self.assertEqual(net.calls, [])
-
-	def test_real_key_usage_problem_is_still_key_usage_even_with_a_profile_gap(self):
+	def test_key_usage_refusal_does_not_depend_on_san_or_eku(self):
 		leaf = MAIN.leaf(ku="encipher", san=False, eku=(EMAIL,))
 		net = world(MAIN, leaf)
 		self.assertRefused("KEY_USAGE", leaf, net)
 		self.assertEqual(net.calls, [])
 
-	def test_profile_positive_controls(self):
-		for label, kw in (("no EKU at all", dict(eku=())), ("clientAuth only", dict(eku=(CLIENT_AUTH,)))):
+	def test_no_tls_profile_rule_san_and_eku_are_not_gates(self):
+		# R2 HIGH: a CMS/PDF signing DSC needs neither a SAN nor TLS clientAuth. Before the fix every case
+		# below except "clientAuth only" was refused as CERTIFICATE_PROFILE before any download.
+		for label, kw in (
+			("no SAN", dict(san=False)),
+			("EKU emailProtection only", dict(eku=(EMAIL,))),
+			("EKU Microsoft documentSigning only", dict(eku=(_test_pki.MS_DOCUMENT_SIGNING,))),
+			("EKU Adobe PDF signing only", dict(eku=(_test_pki.ADOBE_PDF_SIGNING,))),
+			("EKU anyExtendedKeyUsage", dict(eku=(ExtendedKeyUsageOID.ANY_EXTENDED_KEY_USAGE,))),
+			("no EKU at all", dict(eku=())),
+			("clientAuth only", dict(eku=(CLIENT_AUTH,))),
+			("no SAN, no EKU, no keyUsage", dict(san=False, eku=(), ku=None)),
+		):
 			with self.subTest(label):
 				ca_trust.clear_cache()
 				leaf = MAIN.leaf(**kw)
-				self.assertPasses(leaf, world(MAIN, leaf))
+				record = self.assertPasses(leaf, world(MAIN, leaf))
+				self.assertEqual(record["chain"][0]["sha256"], sha(leaf))
 
 	def test_key_usage_positive_controls(self):
 		for label, kw in (
@@ -1262,11 +1262,12 @@ class RecordAndReasonTest(_Base):
 		self.assertEqual(ca_trust.MESSAGES["REVOCATION_UNAVAILABLE"], SPEC_REVOCATION_UNAVAILABLE)
 		for code, message in ca_trust.MESSAGES.items():
 			self.assertIn("not signed", message, code)
-		# finding 2: the profile refusal says plainly that the certificate was NOT found untrusted.
+		# R2 HIGH: the profile refusal is about the signer certificate itself and no longer names any TLS field.
 		profile = ca_trust.MESSAGES["CERTIFICATE_PROFILE"]
-		self.assertIn("subject alternative name and a client-authentication purpose", profile)
-		self.assertIn("It was not rejected as untrusted; please contact support.", profile)
-		self.assertNotIn("not trusted", profile)
+		self.assertIn("certifying-authority certificate, uses a weak algorithm or key, or carries a critical extension", profile)
+		self.assertIn("Please contact support.", profile)
+		for gone in ("subject alternative name", "client-authentication", "not trusted"):
+			self.assertNotIn(gone, profile)
 		self.assertIn("digital signatures", ca_trust.MESSAGES["KEY_USAGE"])
 		with self.assertRaises(ValueError):
 			ca_trust.CertificateNotAuthenticated("SOMETHING_ELSE")
@@ -1303,15 +1304,6 @@ class RecordAndReasonTest(_Base):
 
 	def test_exception_text_never_leaks(self):
 		leaf = MAIN.leaf()
-
-		class _Verifier:
-			def verify(self, *args):
-				raise VerificationError(SENTINEL)
-
-		class _Builder:
-			def __getattr__(self, name):
-				return lambda *a, **k: _Verifier() if name == "build_client_verifier" else self
-
 		cases = [
 			("aia fetch error", "CA_FETCH_FAILED", {MAIN.u["sub_cer"]: RuntimeError(SENTINEL)}, None),
 			("aia garbage body", "CA_FETCH_FAILED", {MAIN.u["sub_cer"]: SENTINEL.encode()}, None),
@@ -1321,7 +1313,12 @@ class RecordAndReasonTest(_Base):
 				{MAIN.u["leaf_ocsp"]: ValueError(SENTINEL), MAIN.u["leaf_crl"]: ValueError(SENTINEL)},
 				None,
 			),
-			("library verification error", "NOT_CCA_TRUSTED", {}, mock.patch.object(ca_trust, "PolicyBuilder", _Builder)),
+			(
+				"path validator internal error",
+				"NOT_CCA_TRUSTED",
+				{},
+				mock.patch.object(ca_trust, "_require_link", side_effect=ValueError(SENTINEL)),
+			),
 			(
 				"unexpected internal error",
 				"REVOCATION_UNAVAILABLE",
@@ -1427,15 +1424,18 @@ class PinnedRootsTest(unittest.TestCase):
 # ---------------------------------------------------------------- generated SignX-profile signer
 
 
-def signer_world(chain, *, ocsp_status="good", with_ocsp=True, crl_revoked=None):
-	"""FakeNet for the generated SignX-shaped chain: AIA served as SignX serves it, OCSP/CRL signed by the test keys."""
+def signer_world(chain, *, ocsp_status="good", with_ocsp=True, crl_revoked=None, leaf=None):
+	"""FakeNet for the generated SignX-shaped chain: AIA served as SignX serves it, OCSP/CRL signed by the test keys.
+
+	``leaf`` is a variant leaf issued by ``chain.sub`` (default ``chain.leaf``); its OCSP answer is for it.
+	"""
 	net = FakeNet()
 	u = _test_pki.URLS
 	net.routes[u["sub_cer"]] = base64.encodebytes(der(chain.sub))  # SignX serves AIA as base64 text
 	net.routes[u["ca_cer"]] = der(chain.ca)
 	net.routes[u["root_cer"]] = der(chain.root)
 	if with_ocsp:
-		net.routes[u["leaf_ocsp"]] = ocsp_bytes(chain.leaf, chain.sub, chain.sub_key, status=ocsp_status)
+		net.routes[u["leaf_ocsp"]] = ocsp_bytes(leaf or chain.leaf, chain.sub, chain.sub_key, status=ocsp_status)
 		net.routes[u["sub_ocsp"]] = ocsp_bytes(chain.sub, chain.ca, chain.ca_key)
 		net.routes[u["ca_ocsp"]] = ocsp_bytes(chain.ca, chain.root, chain.root_key)
 	if crl_revoked is not None:
@@ -1529,6 +1529,376 @@ class SignerProfileChainTest(_Base):
 			self.assertEqual(net.urls(), [u["sub_cer"], u["ca_cer"], u["leaf_ocsp"], u["leaf_crl"]])
 
 
+# ---------------------------------------------------------------- path validator (R2 HIGH: replaces the TLS verifier)
+
+
+class SigningPathValidatorTest(_Base):
+	"""ca_trust._validate_path decides the path with a document-signing profile (spec 002 s9 item 18).
+
+	Positive controls: SignX-shaped leaves without SAN / with any EKU / without keyUsage pass end to end.
+	Negative controls: each check is exercised directly on an explicit chain (so a check cannot hide behind
+	path building) and, for the main ones, end to end through the public API with AIA serving the bad CA.
+	Every refusal is asserted with its reason code; the end-to-end ones also assert nothing was cached.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self.c = _test_pki.signer_chain()
+
+	# -- builders: variants that reuse the chain's keys, so only the field under test differs
+
+	def leaf(self, **kw):
+		kw.setdefault("key", self.c.leaf_key)
+		return _test_pki.make_signer_leaf(self.c.sub.subject, self.c.sub_key, **kw)[0]
+
+	def sub_variant(self, **kw):
+		"""The sub-CA again (same subject and key, so it issued every leaf above), with one field changed."""
+		kw.setdefault("pathlen", 0)
+		kw.setdefault("subject", self.c.sub.subject)
+		kw.setdefault("locations", (_test_pki.URLS["ca_cer"], _test_pki.URLS["sub_ocsp"], _test_pki.URLS["sub_crl"]))
+		issuer = kw.pop("issuer", self.c.ca)
+		issuer_key = kw.pop("issuer_key", self.c.ca_key)
+		return _test_pki.make_ca("unused", self.c.sub_key, issuer, issuer_key, **kw)
+
+	def ca_variant(self, **kw):
+		kw.setdefault("pathlen", 1)
+		kw.setdefault("subject", self.c.ca.subject)
+		return _test_pki.make_ca("unused", self.c.ca_key, self.c.root, self.c.root_key, **kw)
+
+	def validate(self, chain, anchors=None, now=NOW):
+		return ca_trust._validate_path(list(chain), tuple(anchors or [self.c.root]), now)
+
+	def assertPathRefused(self, code, chain, **kw):
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			self.validate(chain, **kw)
+		self.assertEqual(cm.exception.reason_code, code)
+
+	def assertEndToEndRefused(self, code, leaf, net):
+		self.assertRefused(code, leaf, net, roots=[self.c.root])
+		self.assertEqual(ca_trust._INTERMEDIATE_CACHE, {})  # a refused path is never remembered
+
+	def path(self, leaf=None, sub=None, ca=None):
+		return [leaf or self.c.leaf, sub or self.c.sub, ca or self.c.ca, self.c.root]
+
+	# -- positive controls
+
+	def test_positive_control_todays_shape_and_minimal_shapes_validate(self):
+		self.assertIsNone(self.validate(self.path()))
+		for label, kw in (
+			("no SAN", dict(san=False)),
+			("EKU documentSigning only", dict(eku=(_test_pki.MS_DOCUMENT_SIGNING,))),
+			("EKU Adobe PDF signing only", dict(eku=(_test_pki.ADOBE_PDF_SIGNING,))),
+			("EKU emailProtection only", dict(eku=(EMAIL,))),
+			("no EKU", dict(eku=None)),
+			("no keyUsage (absent = unrestricted)", dict(key_usage=None)),
+			("no basicConstraints", dict(basic_constraints=None)),
+			("unknown NON-critical extension (ignored, RFC 5280 s4.2)", dict(extra_extensions=[(_test_pki.unknown_extension(), False)])),
+		):
+			with self.subTest(label):
+				self.assertIsNone(self.validate(self.path(leaf=self.leaf(**kw))))
+
+	def test_leaves_without_tls_fields_pass_end_to_end_with_revocation(self):
+		u = _test_pki.URLS
+		for label, kw in (
+			("no SAN", dict(san=False)),
+			("EKU documentSigning only", dict(eku=(_test_pki.MS_DOCUMENT_SIGNING,))),
+			("EKU emailProtection only", dict(eku=(EMAIL,))),
+			("no EKU", dict(eku=None)),
+			("no keyUsage", dict(key_usage=None)),
+		):
+			with self.subTest(label):
+				ca_trust.clear_cache()
+				leaf = self.leaf(**kw)
+				net = signer_world(self.c, leaf=leaf)
+				record = self.assertPasses(leaf, net, roots=[self.c.root])
+				self.assertEqual([e["sha256"] for e in record["chain"]], [sha(leaf), sha(self.c.sub), sha(self.c.ca), sha(self.c.root)])
+				self.assertEqual(net.urls(), [u["sub_cer"], u["ca_cer"], u["leaf_ocsp"], u["sub_ocsp"], u["ca_ocsp"]])
+
+	def test_ca_policy_extensions_that_cannot_change_the_verdict_are_accepted(self):
+		with self.subTest("critical certificatePolicies"):
+			sub = self.sub_variant(policies_critical=True)
+			self.assertTrue(sub.extensions.get_extension_for_class(x509.CertificatePolicies).critical)
+			self.assertIsNone(self.validate(self.path(sub=sub)))
+		for label, extension in (
+			("critical inhibitAnyPolicy", x509.InhibitAnyPolicy(0)),
+			("critical policyConstraints inhibitPolicyMapping only", x509.PolicyConstraints(None, 0)),
+		):
+			with self.subTest(label):
+				sub = self.sub_variant(extra_extensions=[(extension, True)])
+				self.assertIsNone(self.validate(self.path(sub=sub)))
+
+	def test_ca_without_key_usage_is_accepted_rfc5280_rule(self):
+		# RFC 5280 s6.1.4(n): keyCertSign is checked only when keyUsage is present.
+		self.assertIsNone(self.validate(self.path(sub=self.sub_variant(key_usage=None))))
+
+	# -- leaf negative controls (refused before any download)
+
+	def test_leaf_negative_controls_refused_before_any_fetch(self):
+		weak_rsa = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+		cases = (
+			("leaf cA=true", "CERTIFICATE_PROFILE", self.leaf(basic_constraints=(True, None))),
+			("unknown critical extension", "CERTIFICATE_PROFILE", self.leaf(extra_extensions=[(_test_pki.unknown_extension(), True)])),
+			(
+				"critical nameConstraints in a leaf",
+				"CERTIFICATE_PROFILE",
+				self.leaf(extra_extensions=[(x509.NameConstraints([x509.RFC822Name("example.invalid")], None), True)]),
+			),
+			("requireExplicitPolicy", "CERTIFICATE_PROFILE", self.leaf(extra_extensions=[(x509.PolicyConstraints(0, None), True)])),
+			("RSA-1024 leaf key", "CERTIFICATE_PROFILE", self.leaf(key=weak_rsa)),
+			("EC P-192 leaf key", "CERTIFICATE_PROFILE", self.leaf(key=ec.generate_private_key(ec.SECP192R1()))),
+			("Ed25519 leaf key", "CERTIFICATE_PROFILE", self.leaf(key=ed25519.Ed25519PrivateKey.generate())),
+			("SHA-1 signed leaf", "CERTIFICATE_PROFILE", _test_pki.resign_with_weak_hash(self.c.leaf, self.c.sub_key, "sha1")),
+			("MD5 signed leaf", "CERTIFICATE_PROFILE", _test_pki.resign_with_weak_hash(self.c.leaf, self.c.sub_key, "md5")),
+			("keyEncipherment only", "KEY_USAGE", self.leaf(key_usage=("key_encipherment",))),
+			("self-issued leaf", "NOT_CCA_TRUSTED", self.leaf(subject=self.c.sub.subject)),
+		)
+		for label, code, leaf in cases:
+			with self.subTest(label):
+				ca_trust.clear_cache()
+				net = signer_world(self.c, leaf=leaf)
+				self.assertEndToEndRefused(code, leaf, net)
+				self.assertEqual(net.calls, [])
+				self.assertPathRefused(code, self.path(leaf=leaf))
+
+	def test_positive_control_strong_keys_and_hashes(self):
+		self.assertIsNone(self.validate(self.path(leaf=self.leaf(key=ec.generate_private_key(ec.SECP256R1())))))
+		self.assertIsNone(self.validate(self.path(leaf=self.leaf(key=ec.generate_private_key(ec.SECP384R1())))))
+		for algorithm in (hashes.SHA256(), hashes.SHA384(), hashes.SHA512()):
+			with self.subTest(algorithm.name):
+				self.assertIsNone(self.validate(self.path(leaf=self.leaf(hash_algorithm=algorithm))))
+
+	def test_algorithm_and_key_predicates(self):
+		# The library also refuses SHA-1/MD5 link signatures, so these predicates are what proves our own rule.
+		sha1 = _test_pki.resign_with_weak_hash(self.c.leaf, self.c.sub_key, "sha1")
+		md5 = _test_pki.resign_with_weak_hash(self.c.leaf, self.c.sub_key, "md5")
+		self.assertEqual(sha1.signature_hash_algorithm.name, "sha1")
+		self.assertEqual(md5.signature_hash_algorithm.name, "md5")
+		self.assertFalse(ca_trust._strong_signature(sha1))
+		self.assertFalse(ca_trust._strong_signature(md5))
+		self.assertTrue(ca_trust._strong_signature(self.c.leaf))
+		self.assertFalse(ca_trust._strong_key(rsa.generate_private_key(public_exponent=65537, key_size=1024).public_key()))
+		self.assertFalse(ca_trust._strong_key(ec.generate_private_key(ec.SECP192R1()).public_key()))
+		self.assertFalse(ca_trust._strong_key(ec.generate_private_key(ec.SECP256K1()).public_key()))
+		self.assertTrue(ca_trust._strong_key(self.c.leaf_key.public_key()))
+		self.assertTrue(ca_trust._strong_key(ec.generate_private_key(ec.SECP521R1()).public_key()))
+
+	# -- CA negative controls
+
+	def test_ca_negative_controls_on_an_explicit_chain(self):
+		other_name = types.SimpleNamespace(subject=_test_pki._ca_name("Some Other CA", "Certifying Authority"))
+		name_constraints = x509.NameConstraints([x509.RFC822Name("example.invalid")], None)
+		cases = (
+			("sub-CA without cA (end entity used as CA)", self.sub_variant(basic_constraints=(False, None))),
+			("sub-CA without basicConstraints", self.sub_variant(basic_constraints=None)),
+			("sub-CA keyUsage without keyCertSign", self.sub_variant(key_usage=("crl_sign", "digital_signature"))),
+			("sub-CA signed by another key (tampered signature)", self.sub_variant(issuer_key=_test_pki.rsa_key())),
+			("sub-CA issuer name differs from the CA's subject", self.sub_variant(issuer=other_name)),
+			("sub-CA unknown critical extension", self.sub_variant(extra_extensions=[(_test_pki.unknown_extension(), True)])),
+			("sub-CA critical nameConstraints (not implemented)", self.sub_variant(extra_extensions=[(name_constraints, True)])),
+			("sub-CA non-critical nameConstraints (not ignored)", self.sub_variant(extra_extensions=[(name_constraints, False)])),
+			("sub-CA requireExplicitPolicy (no policy tree)", self.sub_variant(extra_extensions=[(x509.PolicyConstraints(0, None), True)])),
+			("sub-CA SHA-1 signature", _test_pki.resign_with_weak_hash(self.c.sub, self.c.ca_key, "sha1")),
+			("sub-CA MD5 signature", _test_pki.resign_with_weak_hash(self.c.sub, self.c.ca_key, "md5")),
+		)
+		for label, sub in cases:
+			with self.subTest(label):
+				self.assertPathRefused("NOT_CCA_TRUSTED", self.path(sub=sub))
+		with self.subTest("CA keyUsage without keyCertSign"):
+			self.assertPathRefused("NOT_CCA_TRUSTED", self.path(ca=self.ca_variant(key_usage=("crl_sign",))))
+		with self.subTest("CA unknown critical extension"):
+			self.assertPathRefused("NOT_CCA_TRUSTED", self.path(ca=self.ca_variant(extra_extensions=[(_test_pki.unknown_extension(), True)])))
+
+	def test_weak_ca_key_refused(self):
+		weak = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+		weak_sub = _test_pki.make_ca("Weak Sub-CA", weak, self.c.ca, self.c.ca_key, pathlen=0, locations=(_test_pki.URLS["ca_cer"], _test_pki.URLS["sub_ocsp"], _test_pki.URLS["sub_crl"]))
+		url = "https://signxca.com/test-pki/aia/WeakSub.cer"
+		leaf = _test_pki.make_signer_leaf(weak_sub.subject, weak, key=self.c.leaf_key, ca_issuers=url)[0]
+		self.assertPathRefused("NOT_CCA_TRUSTED", [leaf, weak_sub, self.c.ca, self.c.root])
+		net = signer_world(self.c, leaf=leaf)
+		net.routes[url] = der(weak_sub)
+		self.assertEndToEndRefused("NOT_CCA_TRUSTED", leaf, net)
+		self.assertIn(url, net.urls())
+
+	def test_ca_negative_controls_end_to_end_through_aia(self):
+		# The bad sub-CA is what the leaf's AIA address serves; it has the real sub-CA's key, so it did issue
+		# the leaf and path building accepts it: only the validator stands between it and a signature.
+		u = _test_pki.URLS
+		for label, sub in (
+			("sub-CA without cA", self.sub_variant(basic_constraints=(False, None))),
+			("sub-CA keyUsage without keyCertSign", self.sub_variant(key_usage=("crl_sign",))),
+			("sub-CA unknown critical extension", self.sub_variant(extra_extensions=[(_test_pki.unknown_extension(), True)])),
+			("sub-CA critical nameConstraints", self.sub_variant(extra_extensions=[(x509.NameConstraints([x509.RFC822Name("example.invalid")], None), True)])),
+		):
+			with self.subTest(label):
+				ca_trust.clear_cache()
+				net = signer_world(self.c)
+				net.routes[u["sub_cer"]] = der(sub)
+				self.assertEndToEndRefused("NOT_CCA_TRUSTED", self.c.leaf, net)
+				self.assertEqual(net.urls(), [u["sub_cer"], u["ca_cer"]])  # refused before any revocation query
+		with self.subTest("SHA-1 sub-CA: never accepted as the CA's child"):
+			ca_trust.clear_cache()
+			net = signer_world(self.c)
+			net.routes[u["sub_cer"]] = der(_test_pki.resign_with_weak_hash(self.c.sub, self.c.ca_key, "sha1"))
+			self.assertEndToEndRefused("CHAIN_INCOMPLETE", self.c.leaf, net)
+
+	def test_path_length_constraints(self):
+		key2 = _test_pki.rsa_key()
+		sub2_url = "https://signxca.com/test-pki/aia/Sub2.cer"
+		locations = (_test_pki.URLS["sub_cer"], _test_pki.URLS["sub_ocsp"], _test_pki.URLS["sub_crl"])
+		sub2 = _test_pki.make_ca("Test Sub-sub-CA", key2, self.c.sub, self.c.sub_key, pathlen=None, locations=locations)
+		leaf2 = _test_pki.make_signer_leaf(sub2.subject, key2, key=self.c.leaf_key, ca_issuers=sub2_url)[0]
+		with self.subTest("sub-CA pathlen 0 with one CA below it"):
+			self.assertPathRefused("NOT_CCA_TRUSTED", [leaf2, sub2, self.c.sub, self.c.ca, self.c.root])
+		with self.subTest("same, end to end through AIA"):
+			ca_trust.clear_cache()
+			net = signer_world(self.c, leaf=leaf2)
+			net.routes[sub2_url] = der(sub2)
+			self.assertEndToEndRefused("NOT_CCA_TRUSTED", leaf2, net)
+		ca_pl2 = self.ca_variant(pathlen=2)
+		with self.subTest("positive control: sub-CA pathlen 1 under a CA with pathlen 2"):
+			self.assertIsNone(self.validate([leaf2, sub2, self.sub_variant(pathlen=1, issuer=ca_pl2), ca_pl2, self.c.root]))
+		with self.subTest("CA pathlen 1 with two CAs below it (sub-CA unconstrained)"):
+			self.assertPathRefused("NOT_CCA_TRUSTED", [leaf2, sub2, self.sub_variant(pathlen=None), self.c.ca, self.c.root])
+		with self.subTest("root pathlen 0 is respected too"):
+			root_pl0 = _test_pki.make_ca("unused", self.c.root_key, None, None, pathlen=0, subject=self.c.root.subject, validity=_test_pki._VALIDITY["root"])
+			self.assertPathRefused("NOT_CCA_TRUSTED", self.path()[:-1] + [root_pl0], anchors=[root_pl0])
+
+	def test_validity_of_every_ca_at_the_edges(self):
+		# The leaf outlives the sub-CA on both sides, so only the sub-CA's own window decides at the edges.
+		sub = self.c.sub
+		not_after = sub.not_valid_after_utc
+		not_before = sub.not_valid_before_utc
+		leaf = self.leaf(not_before=not_before - DAY, not_after=not_after + DAY)
+		self.assertIsNone(self.validate(self.path(leaf=leaf), now=not_after))  # inclusive, RFC 5280 s4.1.2.5
+		self.assertIsNone(self.validate(self.path(leaf=leaf), now=not_before))
+		second = datetime.timedelta(seconds=1)
+		self.assertPathRefused("EXPIRED_OR_NOT_YET_VALID", self.path(leaf=leaf), now=not_after + second)
+		self.assertPathRefused("EXPIRED_OR_NOT_YET_VALID", self.path(leaf=leaf), now=not_before - second)
+		window = (NOW - 400 * DAY, NOW - DAY)
+		for label, chain in (
+			("expired sub-CA", self.path(sub=self.sub_variant(validity=window))),
+			("expired CA", self.path(ca=self.ca_variant(validity=window))),
+			("not-yet-valid sub-CA", self.path(sub=self.sub_variant(validity=(NOW + DAY, NOW + 400 * DAY)))),
+		):
+			with self.subTest(label):
+				self.assertPathRefused("EXPIRED_OR_NOT_YET_VALID", chain)
+
+	def test_root_must_be_a_pinned_root_by_der(self):
+		with self.subTest("another hierarchy's root"):
+			self.assertPathRefused("NOT_CCA_TRUSTED", self.path()[:-1] + [ROGUE.root])
+		with self.subTest("same name and key as the pinned root, different DER (re-issued, not pinned)"):
+			reissued = _test_pki.make_ca("unused", self.c.root_key, None, None, subject=self.c.root.subject, validity=_test_pki._VALIDITY["root"])
+			self.assertNotEqual(sha(reissued), sha(self.c.root))
+			self.assertTrue(ca_trust._directly_issued(self.c.ca, reissued))
+			self.assertPathRefused("NOT_CCA_TRUSTED", self.path()[:-1] + [reissued])
+		with self.subTest("pinned root presented as the signer certificate"):
+			net = FakeNet()
+			# Its keyUsage (keyCertSign, cRLSign) is checked first; it would also fail as self-issued and as cA.
+			self.assertRefused("KEY_USAGE", self.c.root, net, roots=[self.c.root])
+			self.assertEqual(net.calls, [])
+			self.assertPathRefused("CHAIN_INCOMPLETE", [self.c.root, self.c.root])
+
+	def test_loops_duplicates_and_depth(self):
+		with self.subTest("a certificate repeated in the path"):
+			self.assertPathRefused("CHAIN_INCOMPLETE", [self.c.leaf, self.c.sub, self.c.sub, self.c.ca, self.c.root])
+		with self.subTest("leaf only, no anchor"):
+			self.assertPathRefused("CHAIN_INCOMPLETE", [self.c.leaf])
+		with self.subTest("deeper than MAX_INTERMEDIATES (all distinct, so only the depth cap refuses it first)"):
+			middle = [self.sub_variant(pathlen=None) for _ in range(ca_trust.MAX_INTERMEDIATES + 1)]
+			self.assertEqual(len({sha(c) for c in middle}), ca_trust.MAX_INTERMEDIATES + 1)
+			self.assertPathRefused("CHAIN_INCOMPLETE", [self.c.leaf, *middle, self.c.root])
+		with self.subTest("cross-signed loop through AIA stops"):
+			key_a, key_b = _ec_key(), _ec_key()
+			name_a, name_b = _name("Loop CA A"), _name("Loop CA B")
+			url_a, url_b = "https://signxca.com/loop/a.cer", "https://signxca.com/loop/b.cer"
+			ca_a = make_cert("Loop CA A", key_a, issuer=types.SimpleNamespace(subject=name_b), issuer_key=key_b, ca=True, ku="ca", eku=(), aia_ca=[url_b])
+			ca_b = make_cert("Loop CA B", key_b, issuer=types.SimpleNamespace(subject=name_a), issuer_key=key_a, ca=True, ku="ca", eku=(), aia_ca=[url_a])
+			leaf = make_cert("Loop Signer", _ec_key(), issuer=ca_a, issuer_key=key_a, aia_ca=[url_a])
+			net = FakeNet()
+			net.routes[url_a], net.routes[url_b] = der(ca_a), der(ca_b)
+			self.assertRefused("CHAIN_INCOMPLETE", leaf, net)
+			self.assertEqual(net.urls(), [url_a, url_b, url_a])
+
+	def test_deep_aia_chain_stops_at_max_intermediates(self):
+		keys = [_ec_key() for _ in range(ca_trust.MAX_INTERMEDIATES + 1)]
+		urls = [f"https://signxca.com/deep/{i}.cer" for i in range(len(keys))]
+		net = FakeNet()
+		issuer, issuer_key, issuer_url = self.c.sub, self.c.sub_key, _test_pki.URLS["sub_cer"]
+		for index in reversed(range(len(keys))):  # deep[0] is issued by deep[1] ... deep[last] by the sub-CA
+			cert = make_cert(f"Deep CA {index}", keys[index], issuer=issuer, issuer_key=issuer_key, ca=True, ku="ca", eku=(), aia_ca=[issuer_url])
+			net.routes[urls[index]] = der(cert)
+			issuer, issuer_key, issuer_url = cert, keys[index], urls[index]
+		leaf = make_cert("Deep Signer", _ec_key(), issuer=issuer, issuer_key=issuer_key, aia_ca=[issuer_url])
+		self.assertRefused("CHAIN_INCOMPLETE", leaf, net, roots=[self.c.root])
+		self.assertEqual(net.urls(), urls[: ca_trust.MAX_INTERMEDIATES])
+
+	def test_malformed_certificates_fail_closed(self):
+		def resign(tbs, key):
+			from cryptography.hazmat.primitives.asymmetric import padding
+
+			identifier = _test_pki._tlv(0x30, _test_pki._tlv(0x06, bytes.fromhex("2a864886f70d01010b")) + b"\x05\x00")
+			signature = key.sign(tbs, padding.PKCS1v15(), hashes.SHA256())
+			return x509.load_der_x509_certificate(_test_pki._tlv(0x30, tbs + identifier + _test_pki._tlv(0x03, b"\x00" + signature)))
+
+		with self.subTest("duplicate extension (two SKIs) in the leaf: refused before any fetch"):
+			ski = self.c.leaf.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+			carrier = x509.UnrecognizedExtension(x509.ObjectIdentifier("2.5.29.99"), ski.public_bytes())
+			tbs = self.leaf(extra_extensions=[(carrier, False)]).tbs_certificate_bytes
+			self.assertEqual(tbs.count(bytes.fromhex("0603551d63")), 1)
+			duplicate = resign(tbs.replace(bytes.fromhex("0603551d63"), bytes.fromhex("0603551d0e")), self.c.sub_key)
+			net = FakeNet()
+			self.assertRefused("NOT_CCA_TRUSTED", duplicate, net, roots=[self.c.root])
+			self.assertEqual(net.calls, [])
+		with self.subTest("TBS says sha1WithRSA, outer says sha256WithRSA"):
+			tbs = self.c.leaf.tbs_certificate_bytes.replace(bytes.fromhex("2a864886f70d01010b"), bytes.fromhex("2a864886f70d010105"))
+			mixed = resign(tbs, self.c.sub_key)
+			self.assertEqual(mixed.signature_hash_algorithm.name, "sha256")
+			self.assertPathRefused("NOT_CCA_TRUSTED", self.path(leaf=mixed))
+		with self.subTest("version 1 leaf or CA (no extensions to constrain it)"):
+
+			class _Version1:
+				version = x509.Version.v1
+
+				def __init__(self, cert):
+					self._cert = cert
+
+				def __getattr__(self, name):
+					return getattr(self._cert, name)
+
+			with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+				ca_trust._require_leaf_profile(_Version1(self.c.leaf))
+			self.assertEqual(cm.exception.reason_code, "CERTIFICATE_PROFILE")
+			with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+				ca_trust._require_issuing_ca(_Version1(self.c.sub), 0)
+			self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+			ca_trust._require_leaf_profile(self.c.leaf)  # positive controls: the same certificates as v3
+			ca_trust._require_issuing_ca(self.c.sub, 0)
+
+	def test_issuer_name_must_be_encoded_exactly_as_the_issuers_subject(self):
+		# Compared as DER (RFC 5280 s4.1.2.4), never as text: the same attributes reordered, the same text in
+		# another ASN.1 string type (x509.Name equality says "equal" there) and a case change all refuse. Each is
+		# refused by our own name check alone too (signature check stubbed to "valid").
+		attributes = list(self.c.sub.subject)
+		reordered = x509.Name(list(reversed(attributes)))
+		self.assertEqual(sorted(reordered.rfc4514_string().split(",")), sorted(self.c.sub.subject.rfc4514_string().split(",")))
+		retyped = x509.Name(
+			[x509.NameAttribute(a.oid, a.value, x509.name._ASN1Type.PrintableString) if a.oid != NameOID.COUNTRY_NAME else a for a in attributes]
+		)
+		self.assertEqual(retyped, self.c.sub.subject)  # x509.Name equality ignores the string type ...
+		self.assertNotEqual(retyped.public_bytes(), self.c.sub.subject.public_bytes())  # ... the encoding does not
+		recased = x509.Name([x509.NameAttribute(a.oid, a.value.upper()) if a.oid == NameOID.COMMON_NAME else a for a in attributes])
+		for label, name in (("reordered", reordered), ("string type changed", retyped), ("case changed", recased)):
+			leaf = _test_pki.make_signer_leaf(name, self.c.sub_key, key=self.c.leaf_key)[0]
+			with self.subTest(label):
+				self.assertPathRefused("NOT_CCA_TRUSTED", self.path(leaf=leaf))
+			with self.subTest(label + ", signature check stubbed"), mock.patch.object(ca_trust, "_directly_issued", return_value=True):
+				self.assertPathRefused("NOT_CCA_TRUSTED", self.path(leaf=leaf))
+		with self.subTest("positive control: identical encoding, signature check stubbed"), mock.patch.object(
+			ca_trust, "_directly_issued", return_value=True
+		):
+			self.assertIsNone(self.validate(self.path()))
+
+
 # ---------------------------------------------------------------- real CCA India chain (public certificates only)
 
 
@@ -1540,11 +1910,13 @@ def _fixture(name):
 class RealCCAChainTest(_Base):
 	"""The real pinned CCA India 2022 root and the real SignX intermediates (public, institutional certificates).
 
-	No real end-entity certificate is committed, and none can be generated under the real SignX sub-CA, so the
-	library path verifier (ca_trust._verify_path) is not run over the real chain. Proven here instead, on the real
-	certificates: AIA path building from the real sub-CA up to the pinned root, the signature of every real link,
-	validity windows, the real AIA/OCSP/CRL URLs against the default allowlist, and that a leaf or sub-CA forged
-	under a real SignX name is refused through the public API with the default (pinned) roots.
+	No real end-entity certificate is committed, and none can be generated under the real SignX sub-CA. The path
+	validator (ca_trust._validate_path) runs over the real sub-CA -> real CA -> pinned root with a generated leaf
+	whose single link to the real sub-CA is stubbed; every other check (CA flags, pathlen, keyCertSign, critical
+	extensions, algorithms, key sizes, validity, the real signatures, the pinned root) runs on the real
+	certificates. Also proven: AIA path building from the real sub-CA up to the pinned root, the real AIA/OCSP/CRL
+	URLs against the default allowlist, and that a leaf or sub-CA forged under a real SignX name is refused
+	through the public API with the default (pinned) roots.
 	"""
 
 	LEAF_AIA = "https://signxca.com/repository/aia/SignXClass3Individual.cer"
@@ -1635,6 +2007,67 @@ class RealCCAChainTest(_Base):
 				ca_trust._build_path(self.sub, (MAIN.root,), self.network(net))
 			self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
 			self.assertEqual(net.urls(), [self.SUB_AIA, self.ROOT_AIA])
+
+	def _stub_leaf_link(self, *stubbed):
+		"""Patch _directly_issued so ONLY the given (child, issuer) pairs are taken as signed; all others are real."""
+		real = ca_trust._directly_issued
+		checked = []
+		pairs = {(sha(child), sha(issuer)) for child, issuer in stubbed}
+
+		def directly_issued(cert, issuer):
+			if (sha(cert), sha(issuer)) in pairs:
+				return True
+			checked.append((sha(cert), sha(issuer)))
+			return real(cert, issuer)
+
+		return mock.patch.object(ca_trust, "_directly_issued", side_effect=directly_issued), checked
+
+	def test_real_signx_chain_passes_the_path_validator_with_only_the_leaf_link_stubbed(self):
+		leaf, _ = _test_pki.make_signer_leaf(self.sub.subject, _test_pki.rsa_key(), san=False, eku=None)
+		chain = [leaf, self.sub, self.ca, self.root]
+		patcher, checked = self._stub_leaf_link((leaf, self.sub))
+		with patcher:
+			self.assertIsNone(ca_trust._validate_path(chain, tuple(pinned_roots.PINNED_ROOTS), NOW))
+		# both real links were verified by the real signature check, not by the stub
+		self.assertEqual(checked, [(SIGNX_SUB_SHA256, SIGNX_CA_SHA256), (SIGNX_CA_SHA256, CCA_ROOT_SHA256)])
+		with self.subTest("without the stub the generated leaf is refused: the real sub-CA did not sign it"):
+			with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+				ca_trust._validate_path(chain, tuple(pinned_roots.PINNED_ROOTS), NOW)
+			self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+		with self.subTest("the SPL root is pinned but did not issue the real SignX CA"):
+			with patcher, self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+				ca_trust._validate_path(chain[:-1] + [pinned_roots.PINNED_ROOTS[1]], tuple(pinned_roots.PINNED_ROOTS), NOW)
+			self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+		with self.subTest("the real sub-CA's pathlen 0 refuses one more CA below it"):
+			key = _test_pki.rsa_key()
+			extra = _test_pki.make_ca("Generated Sub-sub-CA", key, self.sub, _test_pki.rsa_key())
+			leaf2, _ = _test_pki.make_signer_leaf(extra.subject, key)
+			patcher2, _ = self._stub_leaf_link((extra, self.sub))
+			with patcher2, self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+				ca_trust._validate_path([leaf2, extra, self.sub, self.ca, self.root], tuple(pinned_roots.PINNED_ROOTS), NOW)
+			self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+		with self.subTest("the real sub-CA after its notAfter (the leaf outlives it)"):
+			long_leaf, _ = _test_pki.make_signer_leaf(
+				self.sub.subject, _test_pki.rsa_key(), not_after=datetime.datetime(2034, 1, 1, tzinfo=UTC)
+			)
+			long_patcher, _ = self._stub_leaf_link((long_leaf, self.sub))
+			with long_patcher, self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+				ca_trust._validate_path(
+					[long_leaf, self.sub, self.ca, self.root], tuple(pinned_roots.PINNED_ROOTS), datetime.datetime(2032, 8, 26, 9, tzinfo=UTC)
+				)
+			self.assertEqual(cm.exception.reason_code, "EXPIRED_OR_NOT_YET_VALID")
+
+	def test_real_certificates_meet_the_ca_profile_on_their_own(self):
+		# Each real CA passes the CA checks with the number of CAs it really has below it in a SignX path.
+		for cert, below in ((self.sub, 0), (self.ca, 1), (self.root, 2), (pinned_roots.PINNED_ROOTS[1], 2)):
+			with self.subTest(ca_trust._common_name(cert)):
+				ca_trust._require_issuing_ca(cert, below)
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated):
+			ca_trust._require_issuing_ca(self.sub, 1)  # pathlen 0
+		ca_trust._require_link(self.sub, self.ca)
+		ca_trust._require_link(self.ca, self.root)
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated):
+			ca_trust._require_link(self.ca, pinned_roots.PINNED_ROOTS[1])
 
 	def test_leaf_claiming_the_real_signx_sub_ca_is_refused_with_the_pinned_roots(self):
 		leaf, _ = _test_pki.make_signer_leaf(
