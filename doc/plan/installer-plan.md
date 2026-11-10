@@ -77,10 +77,17 @@ Clean Windows 10, Windows 11, Apple Silicon and Intel Mac; each token brand in t
 install, reboot, sign without touching anything; kill the helper and see it return; token unplug and swap; sleep and wake;
 upgrade over an older version; uninstall leaves nothing running; pairing refused and revoked; a non-CCA certificate refused.
 
-## 9. Decisions needed from the owner
-1. Which system first (Windows is where most DSC users are; the Mac is the only one tested so far).
-2. Who buys and holds the code-signing certificates (Apple Developer ID; a Windows code-signing certificate).
-3. Which token brands are in the first pilot.
-4. Auto-update policy: user-approved (recommended) or managed by IT only.
-5. Is a status icon wanted in the first release, or later.
-6. Where the installers are published (GitHub Releases or the company website).
+## 9. Owner decisions (2026-11-10)
+1. Order: **Windows first, then Mac.** Phase 3 (Windows) therefore moves ahead of Phase 2 (macOS).
+2. Code-signing certificates: not needed to build or to run an internal pilot, but needed before real customers. Without them
+   Windows SmartScreen shows "unknown publisher" (user must click More info, then Run anyway), some company antivirus or IT
+   policies block the installer, and macOS Gatekeeper blocks an unsigned, un-notarised app. Decision: skip for the internal
+   pilot, buy before customer rollout. Buy: an Apple Developer ID (annual) and a Windows code-signing certificate (annual).
+3. Pilot token: **WatchData** (on Windows). The helper is designed for any token with a PKCS#11 driver, but each brand is
+   treated as working only after a real signing run: WatchData and InnaitKey are proven on macOS; nothing is proven on Windows yet.
+4. Updates: the user approves each update.
+5. A status icon is in the first release.
+6. Publish on the company website first; GitHub Releases afterwards. (GitHub allows files up to 2 GB, so a packaged helper
+   of tens of MB would fit; to be confirmed once built.)
+
+Revised order: Phase 1, then Phase 3 (Windows), then Phase 2 (macOS), then Phase 4.
