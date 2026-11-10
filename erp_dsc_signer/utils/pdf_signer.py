@@ -184,7 +184,7 @@ def sign_pdf_bytes(pdf_bytes: bytes, settings, credentials=None) -> bytes:
 
 	now = frappe.utils.now_datetime().astimezone()
 	tz_offset = _format_tz_offset(now)
-	signer_name = (settings.get("signer_name") or "").strip() or _cert_cn(cert)
+	signer_name = stamp_holder_name((settings.get("signer_name") or "").strip() or _cert_cn(cert))
 	signature_meta = _signature_metadata(pdf_bytes, settings, signer_name, now, tz_offset)
 
 	timestamp_url = None
@@ -337,6 +337,27 @@ def _format_tz_offset(dt) -> str:
 	sign = "+" if total >= 0 else "-"
 	total = abs(total)
 	return f"{sign}{total // 3600:02d}'{(total % 3600) // 60:02d}'"
+
+
+STAMP_NAME_MAX_CHARS = 100
+STAMP_NAME_FALLBACK = "the certificate holder"
+
+
+def stamp_holder_name(common_name):
+	"""The certificate holder's name as printed in the visible stamp.
+
+	The workstation signer refuses any stamp character that would end or escape a PDF text string:
+	( ) \\ and any letter whose raw UTF-16BE bytes contain them (Devanagari, accented capitals ...). A CCA-verified
+	name such as "XYZ INDIA (P) LTD" must not become unsignable, so the stamp text is reduced to plain ASCII:
+	accents are removed, ( ) become [ ], backslash becomes /, other characters are dropped, spaces are collapsed.
+	The stamp is only a label: the signer's real identity is the certificate inside the signature."""
+	import unicodedata
+
+	text = unicodedata.normalize("NFKD", str(common_name or ""))
+	text = text.replace("(", "[").replace(")", "]").replace("\\", "/")
+	text = "".join(ch if 0x20 <= ord(ch) <= 0x7E else " " if ch.isspace() else "" for ch in text)
+	text = " ".join(text.split())[:STAMP_NAME_MAX_CHARS].strip()
+	return text if any(ch.isalnum() for ch in text) else STAMP_NAME_FALLBACK
 
 
 def _cert_cn(cert) -> str:

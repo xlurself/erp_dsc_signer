@@ -347,6 +347,43 @@ class TestAuthenticateEndpoint(_Base):
 		self.assertEqual("Test Signer", signing._signature_metadata.call_args.args[2])
 		self.assertEqual({"name": "signer"}, result["signature_meta"])
 
+	def test_stamp_name_is_made_safe_for_the_signer_daemons_pdf_string_rule(self):
+		# The daemon refuses any stamp character that would end or escape a PDF string: ( ) \\ and, as raw
+		# UTF-16BE, any letter whose bytes contain them (Devanagari U+0928 ...). A real certificate name must
+		# never make a verified certificate unsignable (reviewer finding STAMP-CN, 2026-11-10).
+		cases = {
+			"VINAY SARAF": "VINAY SARAF",
+			"XYZ INDIA (P) LTD": "XYZ INDIA [P] LTD",
+			"Back\\slash Co": "Back/slash Co",
+			"\u00c9LAN \u00e9dition": "ELAN edition",
+			"A & B Pvt. Ltd.": "A & B Pvt. Ltd.",
+			"  spaced   out  ": "spaced out",
+			"Line\nbreak\tTab": "Line break Tab",
+			"\u0935\u093f\u0928\u092f": "the certificate holder",
+			"": "the certificate holder",
+			"((()))": "the certificate holder",  # no letter or digit at all -> fallback
+			"(a)": "[a]",
+			"x" * 300: "x" * 100,
+		}
+		for raw, expected in cases.items():
+			with self.subTest(raw=raw[:20]):
+				self.assertEqual(expected, signing._stamp_holder_name(raw))
+		for ch in "()\\":
+			self.assertNotIn(ch, signing._stamp_holder_name("a(b)c\\d"))
+
+	def test_stamp_uses_the_safe_name_even_for_a_parenthesised_common_name(self):
+		from cryptography import x509
+		from cryptography.hazmat.primitives import hashes, serialization
+		from cryptography.hazmat.primitives.asymmetric import rsa
+		from cryptography.x509.oid import NameOID
+		key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+		name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "XYZ INDIA (P) LTD")])
+		cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(7)
+			.not_valid_before(datetime.datetime(2026, 1, 1)).not_valid_after(datetime.datetime(2030, 1, 1)).sign(key, hashes.SHA256()))
+		signing._signature_metadata.reset_mock()
+		signing._stamp_metadata_for(cert.public_bytes(serialization.Encoding.DER), {"pdf_base64": base64.b64encode(ORIGINAL_PDF).decode()})
+		self.assertEqual("XYZ INDIA [P] LTD", signing._signature_metadata.call_args.args[2])
+
 	def test_prepare_does_not_stamp_a_generic_signer_name(self):
 		prepared = self.prepare()
 		signing._signature_metadata.assert_not_called()
@@ -903,6 +940,23 @@ class TestPfxGate(_Base):
 		self.assertIs(cert, args[3])
 		self.assertEqual(["chain"], args[4])
 		settings.get_password.assert_not_called()
+
+
+	def test_pfx_stamp_name_is_made_safe_for_both_the_setting_and_the_certificate_name(self):
+		# Same STAMP-CN rule as USB: ( ) \\ and non-ASCII must not reach the PDF text string.
+		for configured, cn, expected in (("XYZ INDIA (P) LTD", "ignored", "XYZ INDIA [P] LTD"), ("", "ABC (P) Ltd", "ABC [P] Ltd")):
+			with self.subTest(configured=configured, cn=cn):
+				settings = mock.MagicMock()
+				settings.get.side_effect = lambda name, default=None, c=configured: {"signer_name": c}.get(name, default)
+				with mock.patch.object(pdf_signer, "frappe") as pfr, mock.patch.object(
+					pdf_signer, "_cert_cn", return_value=cn
+				), mock.patch.object(pdf_signer, "_signature_metadata", return_value={"name": "x"}) as meta, mock.patch.object(
+					pdf_signer.cms, "sign", return_value=b" sig"
+				):
+					pfr.utils.now_datetime.return_value = datetime.datetime(2026, 11, 9, 15, 30)
+					pfr.utils.cint.side_effect = lambda v: int(v or 0)
+					pdf_signer.sign_pdf_bytes(b"%PDF-1.7 x", settings, credentials=(object(), mock.MagicMock(), []))
+				self.assertEqual(expected, meta.call_args.args[2])
 
 
 class TestRecordAndLeaks(_Base):

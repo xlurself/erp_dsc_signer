@@ -556,5 +556,32 @@ class TestRealEndesive(unittest.TestCase):
 		self.assertNotIn(b"/Width 37", signed[len(self.pdf) :])
 
 
+class TestStampAlphabetContract(unittest.TestCase):
+	"""The Frappe app (erp_dsc_signer/api/signing.py::_stamp_holder_name) reduces the certificate holder's name to
+	plain ASCII without ( ) and backslash before it goes into the stamp. This pins the daemon's side of that
+	contract: every such character is accepted, and the characters the app removes are exactly the refused ones."""
+
+	@staticmethod
+	def _accepted(text):
+		service = importlib.import_module("erp_dsc_local.service")
+		return service._display(f"Digitally signed by {text}\nDate: 2026.11.10 12:00:00 +05'30'") is not service._INVALID
+
+	def test_every_printable_ascii_character_except_the_pdf_delimiters_is_accepted(self):
+		for code in range(0x20, 0x7F):
+			ch = chr(code)
+			with self.subTest(ch=ch):
+				self.assertEqual(ch not in "()\\", self._accepted(f"A{ch}B"))
+
+	def test_names_the_app_produces_are_accepted(self):
+		for name in ("VINAY SARAF", "XYZ INDIA [P] LTD", "Back/slash Co", "ELAN edition", "the certificate holder"):
+			with self.subTest(name=name):
+				self.assertTrue(self._accepted(name))
+
+	def test_raw_names_the_app_must_never_send_are_refused(self):
+		for name in ("XYZ INDIA (P) LTD", "Back\\slash", "\u0935\u093f\u0928\u092f", "\u0128 x"):
+			with self.subTest(name=name):
+				self.assertFalse(self._accepted(name))
+
+
 if __name__ == "__main__":
 	unittest.main()
