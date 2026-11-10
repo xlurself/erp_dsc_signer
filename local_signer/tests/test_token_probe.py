@@ -541,7 +541,9 @@ class HealthWhileProbeHangsTests(http_tests.ServiceTestCase):
 			patcher = mock.patch.object(target, name, value)
 			patcher.start()
 			self.addCleanup(patcher.stop)
-		self.service.providers.resolve = lambda provider, module_id: SimpleNamespace(path=MODULE_PATH, label="libvendor.dylib")
+		module = SimpleNamespace(id="test-vendor", provider="generic_pkcs11", path=MODULE_PATH, label="libvendor.dylib")
+		self.service.providers.resolve = lambda provider, module_id: module
+		self.service.providers.candidates = lambda provider, module_id: [module]
 		self.trust.allow(http_tests.ERP)
 
 	def test_health_answers_while_certificates_is_hung_then_certificates_gets_the_fixed_error(self):

@@ -122,26 +122,36 @@ class ProviderRegistry:
 		providers[0]["modules"] = [item.public_dict() for item in self._modules if item.available]
 		return providers
 
-	def resolve(self, provider: str, module_id: str | None) -> ProviderModule:
+	def candidates(self, provider: str, module_id: str | None) -> list[ProviderModule]:
+		"""Every available module that ``provider`` / ``module_id`` names, in registry order.
+
+		Never empty.  ``module_id`` is compared only with the registry's own ids, so a
+		request can NAME a module but can never supply a library path.
+		"""
 		if provider not in PROVIDER_LABELS:
 			raise LocalSignerError("UNKNOWN_PROVIDER", "Select a supported DSC token provider.")
 		matches = [item for item in self._modules if item.available and provider in {"auto", item.provider}]
 		if module_id:
-			matches = [item for item in matches if item.id == module_id]
+			matches = [item for item in matches if item.id == module_id][:1]
 			if not matches:
 				raise MiddlewareUnavailable(
 					"The selected PKCS#11 module is unavailable or does not belong to the selected provider."
 				)
-		elif len(matches) > 1:
+		if not matches:
+			raise MiddlewareUnavailable(
+				f"No installed {PROVIDER_LABELS[provider]} PKCS#11 middleware was found. Install the vendor driver or configure its absolute library path."
+			)
+		return matches
+
+	def resolve(self, provider: str, module_id: str | None) -> ProviderModule:
+		"""The ONE module to sign with: several candidates without a ``module_id`` is refused."""
+		matches = self.candidates(provider, module_id)
+		if not module_id and len(matches) > 1:
 			raise LocalSignerError(
 				"MODULE_SELECTION_REQUIRED",
 				"More than one compatible middleware module is installed. Select a module explicitly.",
 				status=409,
 				details={"module_ids": [item.id for item in matches]},
-			)
-		if not matches:
-			raise MiddlewareUnavailable(
-				f"No installed {PROVIDER_LABELS[provider]} PKCS#11 middleware was found. Install the vendor driver or configure its absolute library path."
 			)
 		return matches[0]
 

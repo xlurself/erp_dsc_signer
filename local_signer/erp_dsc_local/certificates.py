@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .errors import LocalSignerError
+
+# Longest ``organization`` the listing reports; the rest is cut.
+ORGANIZATION_MAX_CHARS = 256
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,9 @@ def parse_token_certificate(
 		"subject": certificate.subject.rfc4514_string(),
 		"issuer": certificate.issuer.rfc4514_string(),
 		"common_name": _common_name(certificate.subject),
+		# The subject O, from the parsed certificate (never a driver label): the Desk uses it
+		# to say whose certificate this is.  Plain text, capped, "" when absent.
+		"organization": _organization(certificate.subject),
 		"valid_from": not_before.isoformat(),
 		"valid_to": not_after.isoformat(),
 		"currently_valid": not_before <= datetime.now(timezone.utc) <= not_after,
@@ -159,6 +167,48 @@ def _common_name(name) -> str:
 		return values[0].value if values else ""
 	except (ImportError, IndexError):
 		return ""
+
+
+def _organization(name) -> str:
+	"""The first subject O as plain text: control characters become spaces, format
+	characters (bidi overrides, zero-width) are dropped, whitespace is collapsed, and the
+	result is capped at ``ORGANIZATION_MAX_CHARS``.  "" when there is no O."""
+	from cryptography.x509.oid import NameOID
+
+	values = name.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+	value = values[0].value if values else ""
+	if not isinstance(value, str):
+		return ""
+	cleaned = "".join(
+		" " if unicodedata.category(ch) == "Cc" else "" if unicodedata.category(ch) in ("Cf", "Cs", "Co", "Cn") else ch
+		for ch in value
+	)
+	return re.sub(r"\s+", " ", cleaned).strip()[:ORGANIZATION_MAX_CHARS]
+
+
+def is_signing_certificate(certificate) -> bool:
+	"""True only for an end-entity certificate whose own KeyUsage allows signing.
+
+	Read from the parsed certificate, never from a driver attribute or a metadata flag.
+	Not a signing certificate: a CA (BasicConstraints cA true), a self-issued certificate
+	(a root), and one without digitalSignature or nonRepudiation, including one with no
+	KeyUsage extension at all.  A certificate whose extensions cannot be read is not one.
+	"""
+	try:
+		from cryptography import x509
+
+		if certificate.issuer == certificate.subject:
+			return False
+		extensions = certificate.extensions
+		try:
+			if extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+				return False
+		except x509.ExtensionNotFound:
+			pass
+		usage = extensions.get_extension_for_class(x509.KeyUsage).value
+		return bool(usage.digital_signature or usage.content_commitment)
+	except Exception:
+		return False
 
 
 def _as_utc(value: datetime) -> datetime:

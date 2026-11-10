@@ -50,7 +50,9 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import dialog_child
+from .certificates import is_signing_certificate
 from .errors import (
+	CertificatesHidden,
 	InvalidOrigin,
 	LocalSignerError,
 	OriginNotPaired,
@@ -58,6 +60,7 @@ from .errors import (
 	PinLocked,
 	PinRateLimited,
 	TokenBusy,
+	TokenUnavailable,
 )
 from .nonces import NonceStore
 from .origins import try_canonical_origin
@@ -79,6 +82,10 @@ MAX_PIN_FAILURES = 3
 PIN_LOCKOUT_SECONDS = 900
 # How long a signing request waits for its token's lock before TokenBusy (spec §2, §7).
 TOKEN_LOCK_TIMEOUT_SECONDS = 20
+# Overall wait for a /v1/certificates listing that reads several modules at once.  Each
+# module's own child is already killed at token.PROBE_TIMEOUT_SECONDS, so a reader still
+# running at this cap ends by itself shortly after; its answer is then simply not used.
+CERTIFICATE_LISTING_SECONDS = 20
 
 # PKCS#11 CK_TOKEN_INFO flag values, used when PyKCS11 cannot be imported.
 _CKF_USER_PIN_FINAL_TRY = 0x00020000
@@ -280,6 +287,56 @@ def sanitise_signature_meta(meta) -> dict:
 	return clean
 
 
+def _read_concurrently(readers, limit_seconds) -> list:
+	"""Call every reader in its own daemon thread; wait at most ``limit_seconds`` in all.
+
+	Returns one outcome per reader, in order: its return value, the exception it raised,
+	or ``None`` if it had not finished by the cap.  An unfinished reader is abandoned, not
+	interrupted: each one is a probe whose child token.run_probe kills on its own limit.
+	"""
+	outcomes = [None] * len(readers)
+
+	def run(index, reader):
+		try:
+			outcomes[index] = reader()
+		except Exception as exc:  # recorded, never raised from the thread
+			outcomes[index] = exc
+
+	threads = [
+		threading.Thread(target=run, args=(index, reader), name="erp-dsc-certificates", daemon=True)
+		for index, reader in enumerate(readers)
+	]
+	for thread in threads:
+		thread.start()
+	deadline = time.monotonic() + limit_seconds
+	for thread in threads:
+		thread.join(max(0.0, deadline - time.monotonic()))
+	return [outcome if not thread.is_alive() else None for thread, outcome in zip(threads, list(outcomes))]
+
+
+def _signing_listing(listed) -> list[dict]:
+	"""Public metadata of the signing certificates in ``[(module, certificates), ...]``.
+
+	A CA, a root and a certificate whose KeyUsage does not allow signing is dropped
+	(``is_signing_certificate``, from the parsed certificate).  The same certificate on the
+	same token seen through a second module is listed once, from the first module in
+	registry order.  ``module_id`` and ``provider`` come from the registry, last, so nothing
+	in the metadata can stand in for them.
+	"""
+	seen = set()
+	public = []
+	for module, certificates in listed:
+		for item in certificates:
+			if not is_signing_certificate(item.crypto_certificate):
+				continue
+			key = (item.metadata["fingerprint_sha256"], item.token_serial)
+			if key in seen:
+				continue
+			seen.add(key)
+			public.append({**item.metadata, "module_id": module.id, "provider": module.provider})
+	return public
+
+
 class PinLimiter:
 	"""In-memory, per-token count of consecutive incorrect PINs (spec §7).
 
@@ -453,6 +510,31 @@ class SignerService:
 			"claimed_user": claims.user,
 		}
 
+	def list_certificates(self, provider, module_id) -> list[dict]:
+		"""The ``/v1/certificates`` listing: signing certificates only, each tagged with the
+		registry's ``module_id`` and ``provider`` for the module it was read through.
+
+		One candidate module (an explicit ``module_id``, or the only installed one) is read
+		exactly as before and its errors propagate.  Several candidates (``auto`` or a
+		provider with more than one installed module, no ``module_id``) are ALL read, each in
+		its own killable child, concurrently, under ``CERTIFICATE_LISTING_SECONDS``; a module
+		with no token, a hung driver or any other failure is skipped.  When no module could
+		be read: ``CertificatesHidden`` if one reported that, otherwise ``TokenUnavailable``
+		with its fixed default message (no driver text, no path).
+		"""
+		modules = self.providers.candidates(provider, module_id)
+		if len(modules) == 1:
+			return _signing_listing([(modules[0], TokenClient(modules[0]).certificates())])
+		# Built here, so a missing PyKCS11 is DEPENDENCY_MISSING exactly as before.
+		clients = [TokenClient(module) for module in modules]
+		outcomes = _read_concurrently([client.certificates for client in clients], CERTIFICATE_LISTING_SECONDS)
+		listed = [(module, outcome) for module, outcome in zip(modules, outcomes) if isinstance(outcome, list)]
+		if listed:
+			return _signing_listing(listed)
+		if any(isinstance(outcome, CertificatesHidden) for outcome in outcomes):
+			raise CertificatesHidden()
+		raise TokenUnavailable()
+
 	def sign(self, origin: str, pdf: bytes, signature_meta: dict, *, document_name, selector, provider, module_id, timestamp_url):
 		"""The ``/v1/sign`` order (spec §7): every refusal that needs no PIN comes first.
 
@@ -570,9 +652,8 @@ class SignerService:
 						self._respond(200, {"ok": True, "nonce": nonce, "expires_in_seconds": ttl}, origin)
 					elif self.path == "/v1/certificates":
 						service.nonces.consume(body.get("nonce"), origin, "certificates")
-						client = TokenClient(service.providers.resolve(body.get("provider", "auto"), body.get("module_id")))
-						certificates = client.certificates()
-						self._respond(200, {"ok": True, "certificates": [item.metadata for item in certificates]}, origin)
+						certificates = service.list_certificates(body.get("provider", "auto"), body.get("module_id"))
+						self._respond(200, {"ok": True, "certificates": certificates}, origin)
 					elif self.path == "/v1/sign":
 						service.nonces.consume(body.get("nonce"), origin, "sign")
 						self._sign(origin, body)

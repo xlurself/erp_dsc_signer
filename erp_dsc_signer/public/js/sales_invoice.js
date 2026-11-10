@@ -76,7 +76,7 @@ async function sign_with_usb(frm, replace, provider, base_url) {
 		// trusted never leaves a half-built signing session behind.
 		await ensure_paired(base_url);
 		const prepared = await frappe_request("erp_dsc_signer.api.signing.prepare_usb_signing", {name: frm.doc.name, replace, provider});
-		const selected = await select_local_certificate(base_url, provider);
+		const selected = await select_local_certificate(base_url, provider, frm.doc.company);
 		const certificate = {fingerprint_sha256: selected.fingerprint_sha256};
 		// F2: authenticate the certificate against the CCA India hierarchy BEFORE any PIN is requested.
 		// A refusal rejects frappe_request and lands in the outer catch: nothing below runs.
@@ -93,7 +93,9 @@ async function sign_with_usb(frm, replace, provider, base_url) {
 		frappe.dom.freeze(__("Click the signer window, then type your PIN"));
 		const signed = await local_request(base_url, "/v1/sign", "POST", {
 			nonce: sign_nonce.nonce,
-			provider,
+			// The module the certificate was listed through: signing names it explicitly.
+			provider: selected.provider || provider,
+			module_id: selected.module_id,
 			certificate,
 			pdf_base64: prepared.pdf_base64,
 			pdf_sha256: prepared.pdf_sha256,
@@ -117,22 +119,141 @@ async function sign_with_usb(frm, replace, provider, base_url) {
 	}
 }
 
-async function select_local_certificate(base_url, provider) {
+// The signer lists only signing certificates, from every installed token driver. The user
+// always sees whose certificate it is before the PIN, even when there is only one.
+async function select_local_certificate(base_url, provider, company) {
 	const nonce = await local_request(base_url, "/v1/nonce", "POST", {purpose: "certificates"});
 	const result = await local_request(base_url, "/v1/certificates", "POST", {nonce: nonce.nonce, provider});
 	const certificates = result.certificates || [];
 	if (!certificates.length) throw new Error(__("No signing certificate is available on the connected token."));
-	if (certificates.length === 1) return {fingerprint_sha256: certificates[0].fingerprint_sha256, der_base64: certificates[0].der_base64};
+	const cards = certificates.map((cert) => describe_certificate(cert, company));
+	const matching = cards.map((card, index) => (card.matches_company ? index : -1)).filter((index) => index >= 0);
+	const preselected = certificates.length === 1 ? 0 : matching.length === 1 ? matching[0] : -1;
 	return new Promise((resolve, reject) => {
 		const dialog = new frappe.ui.Dialog({
-			title: __("Select DSC Certificate"),
-			fields: [{fieldname: "fingerprint", label: __("Certificate"), fieldtype: "Select", options: certificates.map((cert) => `${cert.fingerprint_sha256}\t${cert.common_name || cert.subject}`).join("\n")}],
-			primary_action_label: __("Use Certificate"),
-			primary_action(values) { dialog.hide(); const fingerprint = values.fingerprint.split("\t")[0]; const chosen = certificates.find((cert) => cert.fingerprint_sha256 === fingerprint); resolve({fingerprint_sha256: fingerprint, der_base64: chosen && chosen.der_base64}); },
+			title: __("Choose the certificate to sign with"),
+			fields: [{fieldname: "certificates", fieldtype: "HTML", options: certificate_cards_html(cards, preselected)}],
+			primary_action_label: __("Sign with this certificate"),
+			primary_action() {
+				const index = Number.parseInt(dialog.$wrapper.find('input[name="erp_dsc_certificate"]:checked').val(), 10);
+				const chosen = Number.isInteger(index) ? certificates[index] : undefined;
+				if (!chosen) {
+					frappe.show_alert({message: __("Pick a certificate first."), indicator: "orange"});
+					return;
+				}
+				// Resolve BEFORE hide: "hidden.bs.modal" rejects, and may fire synchronously.
+				// The fingerprint is only an internal value: it is never shown in the list.
+				resolve({fingerprint_sha256: chosen.fingerprint_sha256, der_base64: chosen.der_base64, module_id: chosen.module_id, provider: chosen.provider});
+				dialog.hide();
+			},
+			secondary_action_label: __("Cancel"),
+			secondary_action() {
+				dialog.hide();
+			},
 		});
+		// After a resolve, this reject does nothing.
 		dialog.$wrapper.on("hidden.bs.modal", () => reject(new Error(__("Certificate selection was cancelled."))));
 		dialog.show();
 	});
+}
+
+// What the picker says about one certificate, as plain-text lines (escaped when drawn).
+// Display only: the company hint never blocks signing.
+function describe_certificate(cert, company) {
+	const name = plain_text(cert.common_name) || name_attribute(cert.subject, "CN") || __("Unknown signer");
+	const organization = cert.organization === undefined ? name_attribute(cert.subject, "O") : plain_text(cert.organization);
+	const personal = !organization || organization.toLowerCase() === "personal";
+	const invoice_company = plain_text(company);
+	const matches_company = !personal && organization.toLowerCase() === invoice_company.toLowerCase();
+	let hint = null;
+	if (invoice_company) {
+		hint = matches_company
+			? {tone: "green", text: __("Matches this invoice's company ({0})", [invoice_company])}
+			: {tone: "amber", text: __("This certificate is not in your company's name. The invoice company is {0}.", [invoice_company])};
+	}
+	const until = human_date(cert.valid_to);
+	const expired = Boolean(until) && new Date(cert.valid_to).getTime() < Date.now();
+	const validity = expired ? __("Expired on {0}", [until]) : until ? __("Valid until {0}", [until]) : "";
+	const issued_by = __("Issued by: {0}", [simple_issuer(cert.issuer) || __("unknown")]);
+	return {
+		signer: personal ? __("{0} (personal certificate, not tied to a company)", [name]) : __("{0}, for {1}", [name, organization]),
+		type: personal ? __("Type: Personal certificate") : __("Type: Organisation certificate"),
+		validity: [validity, issued_by].filter(Boolean).join(" · "),
+		token: __("Token: {0}", [plain_text(cert.token_label) || __("no name")]),
+		hint,
+		matches_company,
+	};
+}
+
+// Every piece of certificate text goes through frappe.utils.escape_html; the radio value is
+// the list position, never certificate data.
+function certificate_cards_html(cards, preselected) {
+	const escape = (text) => frappe.utils.escape_html(text);
+	const tones = {green: "var(--green-600, #2f855a)", amber: "var(--orange-600, #b7791f)"};
+	const items = cards.map((card, index) => {
+		const hint = card.hint ? `<div style="color: ${tones[card.hint.tone]}; margin-top: 4px;">${escape(card.hint.text)}</div>` : "";
+		return (
+			`<label style="display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--border-color, #d1d8dd); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; font-weight: normal;">` +
+			`<input type="radio" name="erp_dsc_certificate" value="${index}"${index === preselected ? " checked" : ""} style="margin-top: 4px;">` +
+			`<div><div><strong>${escape(card.signer)}</strong></div>` +
+			`<div>${escape(card.type)}</div><div>${escape(card.validity)}</div><div>${escape(card.token)}</div>${hint}</div>` +
+			`</label>`
+		);
+	});
+	const help = __("Pick the certificate that should appear as the signer on this invoice. For company invoices choose the one in your company's name.");
+	return `<p class="text-muted">${escape(help)}</p>${items.join("")}`;
+}
+
+// Certificate fields come from the token: shown as plain text only, with control and
+// direction-changing characters removed so a name cannot hide or reorder text.
+function plain_text(value) {
+	return String(value === null || value === undefined ? "" : value)
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/[­؜​-‏‪-‮⁠-⁩﻿]/g, "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 200);
+}
+
+// One attribute ("CN", "O") of an RFC 4514 name such as "CN=Test Signer,O=Test Company Pvt Ltd,C=IN".
+function name_attribute(name, attribute) {
+	const parts = [];
+	let current = "";
+	let escaped = false;
+	for (const ch of String(name || "")) {
+		if (escaped) {
+			current += ch;
+			escaped = false;
+		} else if (ch === "\\") {
+			escaped = true;
+		} else if (ch === "," || ch === "+") {
+			parts.push(current);
+			current = "";
+		} else {
+			current += ch;
+		}
+	}
+	parts.push(current);
+	const prefix = `${attribute.toUpperCase()}=`;
+	const found = parts.map((part) => part.trim()).find((part) => part.toUpperCase().startsWith(prefix));
+	return found ? plain_text(found.slice(prefix.length)) : "";
+}
+
+// "SignX sub-CA for Class 3 Individual 2022" becomes "SignX (Class 3)". Any other name is shown as it is.
+function simple_issuer(issuer) {
+	const name = name_attribute(issuer, "CN") || name_attribute(issuer, "O");
+	const match = /^(.+?)\s+sub[\s-]?CA\b(.*)$/i.exec(name);
+	if (!match) return name;
+	const level = /\bclass\s*([1-3])\b/i.exec(match[2]);
+	return level ? `${match[1]} (Class ${level[1]})` : match[1];
+}
+
+// "27 Oct 2029" (UTC date) or "" when the value is not a date.
+function human_date(value) {
+	const date = new Date(value);
+	if (!value || Number.isNaN(date.getTime())) return "";
+	const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+	return `${date.getUTCDate()} ${months[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 }
 
 async function frappe_request(method, args) {

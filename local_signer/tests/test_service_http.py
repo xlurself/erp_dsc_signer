@@ -160,6 +160,8 @@ class ServiceTestCase(unittest.TestCase):
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		self.service.providers.resolve = lambda provider, module_id: "fake-module"
+		# The listing asks the registry for candidates: never the real installed drivers here.
+		self.service.providers.candidates = lambda provider, module_id: ["fake-module"]
 
 		self.server = self.service.make_server(("127.0.0.1", 0))
 		self.addCleanup(self.server.server_close)

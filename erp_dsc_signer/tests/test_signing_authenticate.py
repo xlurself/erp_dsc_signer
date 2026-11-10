@@ -1097,6 +1097,270 @@ class TestSalesInvoiceJsContract(unittest.TestCase):
 		self.assertEqual([expected for _, expected in cases], json.loads(completed.stdout))
 
 
+	# ---- certificate picker: every module, plain English, escaped, explicit module on /v1/sign
+
+	def test_sign_request_body_names_the_chosen_module_and_provider(self):
+		body = _sign_request_body(self.text)
+		self.assertIn("module_id: selected.module_id,", body)
+		self.assertIn("provider: selected.provider || provider,", body)
+		self.assertIn("select_local_certificate(base_url, provider, frm.doc.company)", _function_body(self.text, "sign_with_usb"))
+
+	def test_picker_wording_is_plain(self):
+		picker = "".join(_function_body(self.text, name) for name in _PICKER_FUNCTIONS)
+		strings = re.findall(r'__\("([^"]*)"', picker)
+		self.assertIn("Choose the certificate to sign with", strings)
+		self.assertIn("Pick the certificate that should appear as the signer on this invoice. For company invoices choose the one in your company's name.", strings)
+		self.assertIn("Sign with this certificate", strings)
+		self.assertIn("Cancel", strings)
+		for jargon in ("PKCS", "chain", "fingerprint", "SHA", "module", "slot"):
+			with self.subTest(jargon=jargon):
+				self.assertEqual([], [s for s in strings if jargon.lower() in s.lower()])
+
+	def _node(self, text, scenario):
+		node = shutil.which("node")
+		if not node:
+			self.skipTest("node is not installed")
+		completed = subprocess.run([node, "-e", _NODE_HARNESS + text + "\n" + scenario], capture_output=True, text=True, timeout=60)
+		self.assertEqual(0, completed.returncode, completed.stderr[-800:])
+		return json.loads(completed.stdout.strip().splitlines()[-1])
+
+	def test_picker_cards_say_who_signs_in_plain_english_in_node(self):
+		self.assertEqual([], _picker_card_problems(self._node(self.text, _CARD_SCENARIO)))
+
+	def test_negative_controls_picker_card_problems_are_detected(self):
+		mutants = {
+			"no escaping": self.text.replace("const escape = (text) => frappe.utils.escape_html(text);", "const escape = (text) => text;", 1),
+			"fingerprint shown": self.text.replace(
+				"token: __(\"Token: {0}\", [plain_text(cert.token_label) || __(\"no name\")]),",
+				"token: __(\"Token: {0}\", [plain_text(cert.token_label) || __(\"no name\")]) + \" \" + cert.fingerprint_sha256,",
+				1,
+			),
+			"case-sensitive company match": self.text.replace(
+				"organization.toLowerCase() === invoice_company.toLowerCase()", "organization === invoice_company", 1
+			),
+			"personal counted as a company": self.text.replace(
+				'const personal = !organization || organization.toLowerCase() === "personal";', "const personal = !organization;", 1
+			),
+			"no amber hint": self.text.replace(": {tone: \"amber\"", ": null && {tone: \"amber\"", 1),
+		}
+		for label, mutant in mutants.items():
+			with self.subTest(label):
+				self.assertNotEqual(self.text, mutant)
+				self.assertNotEqual([], _picker_card_problems(self._node(mutant, _CARD_SCENARIO)))
+
+	def test_single_certificate_still_needs_confirmation_in_node(self):
+		self.assertEqual([], _single_confirmation_problems(self._node(self.text, _SINGLE_SCENARIO)))
+
+	def test_negative_control_single_certificate_auto_selected_is_detected(self):
+		anchor = "const cards = certificates.map((cert) => describe_certificate(cert, company));"
+		mutant = self.text.replace(
+			anchor,
+			"if (certificates.length === 1) return {fingerprint_sha256: certificates[0].fingerprint_sha256, der_base64: certificates[0].der_base64, module_id: certificates[0].module_id, provider: certificates[0].provider};\n\t" + anchor,
+			1,
+		)
+		self.assertNotEqual(self.text, mutant)
+		self.assertNotEqual([], _single_confirmation_problems(self._node(mutant, _SINGLE_SCENARIO)))
+
+	def test_sign_flow_sends_the_chosen_module_in_node(self):
+		self.assertEqual([], _sign_flow_problems(self._node(self.text, _SIGN_SCENARIO)))
+
+	def test_negative_controls_sign_flow_module_problems_are_detected(self):
+		mutants = {
+			"module_id dropped": self.text.replace("module_id: selected.module_id,\n", "", 1),
+			"dialog provider instead of the certificate's": self.text.replace("provider: selected.provider || provider,", "provider,", 1),
+			"no pre-selection of the company match": self.text.replace("matching.length === 1 ? matching[0] : -1", "-1", 1),
+		}
+		for label, mutant in mutants.items():
+			with self.subTest(label):
+				self.assertNotEqual(self.text, mutant)
+				self.assertNotEqual([], _sign_flow_problems(self._node(mutant, _SIGN_SCENARIO)))
+
+
+_PICKER_FUNCTIONS = ("select_local_certificate", "describe_certificate", "certificate_cards_html")
+
+# Stand-ins for the Desk: frappe.utils.escape_html is Frappe v14's own mapping; the dialog
+# records its config and answers like the real one (hide -> "hidden.bs.modal"); the checked
+# radio is read from the HTML the code produced.  fetch serves the signer's answers.
+_NODE_HARNESS = r"""
+const __ = (text, args) => (args ? text.replace(/\{(\d+)\}/g, (_m, i) => String(args[i])) : text);
+const ESCAPES = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#x60;", "=": "&#x3D;"};
+const dialogs = [];
+const fetched = [];
+const calls = [];
+const responses = {};
+const server = {};
+let answer = null;
+class FakeDialog {
+	constructor(config) {
+		this.config = config;
+		this.handlers = {};
+		this.hidden = false;
+		dialogs.push(this);
+		const html = (config.fields || []).map((field) => field.options || "").join("");
+		const match = /value="(\d+)" checked/.exec(html);
+		this.checked = match ? match[1] : undefined;
+		const self = this;
+		this.$wrapper = {on(event, fn) { self.handlers[event] = fn; }, find() { return {val: () => self.checked}; }};
+	}
+	show() {
+		if (answer) setTimeout(() => (answer === "cancel" ? this.config.secondary_action() : this.config.primary_action({})), 0);
+	}
+	hide() {
+		if (this.hidden) return;
+		this.hidden = true;
+		if (this.handlers["hidden.bs.modal"]) this.handlers["hidden.bs.modal"]();
+	}
+}
+var frappe = {
+	ui: {form: {on() {}}, Dialog: FakeDialog},
+	utils: {escape_html: (txt) => (txt ? String(txt).replace(/[&<>"'`=]/g, (ch) => ESCAPES[ch] || ch) : "")},
+	call(options) { calls.push({method: options.method, args: options.args}); setTimeout(() => options.callback({message: server[options.method]}), 0); },
+	dom: {freeze() {}, unfreeze() {}},
+	msgprint(message) { calls.push({msgprint: message}); },
+	show_alert(message) { calls.push({alert: message}); },
+	urllib: {get_full_url: (url) => url},
+};
+globalThis.window = {location: {origin: "https://erp.example.invalid"}};
+globalThis.fetch = async (url, options) => {
+	const path = new URL(url).pathname;
+	fetched.push({path, body: options.body ? JSON.parse(options.body) : null});
+	return {ok: true, json: async () => responses[path]};
+};
+const FP_A = "a1".repeat(32), FP_B = "b2".repeat(32), FP_C = "c3".repeat(32);
+const CERTS = [
+	{fingerprint_sha256: FP_A, serial_number: "5EED1234ABCD", der_base64: "QUFB", common_name: "Test Signer", organization: "TEST  Company pvt LTD",
+	 issuer: "CN=SignX sub-CA for Class 3 Individual 2022,O=Test CA Pvt Ltd,C=IN", valid_to: "2099-10-27T18:29:59+00:00", token_label: "Test Token A", module_id: "test-wd", provider: "watchdata"},
+	{fingerprint_sha256: FP_B, serial_number: "5EED5678EF01", der_base64: "QkJC", common_name: "Test Signer", organization: "Personal",
+	 issuer: "CN=Test Root CA 2022,C=IN", valid_to: "2001-01-02T00:00:00+00:00", token_label: "Test Token B", module_id: "test-innait", provider: "generic_pkcs11"},
+	{fingerprint_sha256: FP_C, serial_number: "5EED9ABC2345", der_base64: "Q0ND", common_name: "<img src=x onerror=alert(1)>", organization: "Other <b>Test</b> Company",
+	 issuer: "CN=Capricorn Sub CA for Individual DSC 2022,C=IN", valid_to: "2099-03-05T00:00:00+00:00", token_label: "\"><script>alert(1)</script>", module_id: "test-wd", provider: "watchdata"},
+];
+const COMPANY = "Test Company Pvt Ltd";
+const print = (value) => console.log(JSON.stringify(value));
+"""
+
+_CARD_SCENARIO = r"""
+const cards = CERTS.map((cert) => describe_certificate(cert, COMPANY));
+const html = certificate_cards_html(cards, 0);
+const visible = html.replace(/<[^>]*>/g, "\n");
+print({cards, html, visible, hex: CERTS.flatMap((c) => [c.fingerprint_sha256, c.serial_number])});
+"""
+
+_SINGLE_SCENARIO = r"""
+(async () => {
+	responses["/v1/nonce"] = {ok: true, nonce: "n".repeat(32)};
+	responses["/v1/certificates"] = {ok: true, certificates: [CERTS[1]]};
+	let settled = null;
+	const pending = select_local_certificate("http://127.0.0.1:17777", "auto", COMPANY).then((value) => (settled = {value}), (error) => (settled = {error: error.message}));
+	for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+	const before = settled;
+	const dialog = dialogs[0];
+	const shown = dialog ? {title: dialog.config.title, primary: dialog.config.primary_action_label, secondary: dialog.config.secondary_action_label, checked: dialog.checked,
+		html: dialog.config.fields.map((f) => f.options).join("")} : null;
+	if (dialog) dialog.config.primary_action({});
+	await pending;
+	const confirmed = settled;
+	settled = null;
+	const second = select_local_certificate("http://127.0.0.1:17777", "auto", COMPANY).then((value) => (settled = {value}), (error) => (settled = {error: error.message}));
+	for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+	if (dialogs[1]) dialogs[1].config.secondary_action();
+	await Promise.race([second, new Promise((r) => setTimeout(r, 50))]);
+	print({before, shown, confirmed, cancelled: settled, dialogs: dialogs.length});
+})();
+"""
+
+_SIGN_SCENARIO = r"""
+(async () => {
+	answer = "sign";
+	responses["/v1/health"] = {ok: true, paired: true};
+	responses["/v1/nonce"] = {ok: true, nonce: "n".repeat(32)};
+	responses["/v1/certificates"] = {ok: true, certificates: [CERTS[1], CERTS[0]]};
+	responses["/v1/sign"] = {ok: true, signed_pdf_base64: "JVBERi0=", certificate_metadata: {fingerprint_sha256: FP_A}};
+	server["erp_dsc_signer.api.signing.prepare_usb_signing"] = {session_id: "s", nonce: "sn", pdf_base64: "JVBERi0=", pdf_sha256: "00", signing_request: {document_name: "SINV-TEST-0001"}};
+	server["erp_dsc_signer.api.signing.authenticate_usb_certificate"] = {verified: true, certificate_sha256: FP_A, signature_meta: {}};
+	server["erp_dsc_signer.api.signing.complete_usb_signing"] = {verification: {verified: true}};
+	const frm = {doc: {name: "SINV-TEST-0001", company: COMPANY}, reload_doc() { calls.push({reloaded: true}); }};
+	// A flow stuck in the picker must still report what it sent.
+	await Promise.race([sign_with_usb(frm, 0, "auto", "http://127.0.0.1:17777"), new Promise((r) => setTimeout(r, 500))]);
+	print({fetched, calls});
+})();
+"""
+
+
+def _picker_card_problems(result):
+	"""What is wrong with the cards for CERTS (company, expired personal, hostile text)."""
+	problems = []
+	cards, html, visible = result["cards"], result["html"], result["visible"]
+	expected = [
+		("Test Signer, for TEST Company pvt LTD", "Type: Organisation certificate", "Valid until 27 Oct 2099 · Issued by: SignX (Class 3)", "Token: Test Token A",
+		 {"tone": "green", "text": "Matches this invoice's company (Test Company Pvt Ltd)"}, True),
+		("Test Signer (personal certificate, not tied to a company)", "Type: Personal certificate", "Expired on 2 Jan 2001 · Issued by: Test Root CA 2022", "Token: Test Token B",
+		 {"tone": "amber", "text": "This certificate is not in your company's name. The invoice company is Test Company Pvt Ltd."}, False),
+	]
+	for index, (signer, kind, validity, token, hint, matches) in enumerate(expected):
+		card = cards[index]
+		got = (card["signer"], card["type"], card["validity"], card["token"], card["hint"], card["matches_company"])
+		if got != (signer, kind, validity, token, hint, matches):
+			problems.append(f"card {index}: {got!r}")
+	if cards[2]["hint"] is None or cards[2]["hint"]["tone"] != "amber":
+		problems.append("a different company is not flagged")
+	if cards[2]["validity"] != "Valid until 5 Mar 2099 · Issued by: Capricorn":
+		problems.append(f"issuer wording: {cards[2]['validity']!r}")
+	for raw in ("<img", "<script", "<b>", "onerror=alert"):
+		if raw in html:
+			problems.append(f"unescaped certificate text: {raw}")
+	if "&lt;img src&#x3D;x onerror&#x3D;alert(1)&gt;" not in html:
+		problems.append("the hostile common name is not shown escaped")
+	if re.findall(r'value="([^"]*)"', html) != ["0", "1", "2"]:
+		problems.append("radio values are not list positions")
+	for value in result["hex"]:
+		if value.lower() in visible.lower():
+			problems.append("a fingerprint or serial is visible")
+	if re.search(r"[0-9a-f]{12,}", visible, re.I):
+		problems.append("hex is visible")
+	return problems
+
+
+def _single_confirmation_problems(result):
+	problems = []
+	if result["before"] is not None:
+		problems.append(f"a single certificate was chosen without asking: {result['before']!r}")
+	shown = result["shown"] or {}
+	if (shown.get("title"), shown.get("primary"), shown.get("secondary")) != ("Choose the certificate to sign with", "Sign with this certificate", "Cancel"):
+		problems.append(f"confirmation dialog: {shown!r}")
+	if shown.get("checked") != "0":
+		problems.append("the only certificate is not pre-selected")
+	if "Test Signer (personal certificate, not tied to a company)" not in (shown.get("html") or ""):
+		problems.append("the card is not shown")
+	expected = {"fingerprint_sha256": "b2" * 32, "der_base64": "QkJC", "module_id": "test-innait", "provider": "generic_pkcs11"}
+	if result["confirmed"] != {"value": expected}:
+		problems.append(f"confirmed: {result['confirmed']!r}")
+	if result["cancelled"] != {"error": "Certificate selection was cancelled."}:
+		problems.append(f"cancel: {result['cancelled']!r}")
+	return problems
+
+
+def _sign_flow_problems(result):
+	problems = []
+	paths = [item["path"] for item in result["fetched"]]
+	if paths != ["/v1/health", "/v1/nonce", "/v1/certificates", "/v1/nonce", "/v1/sign"]:
+		problems.append(f"requests: {paths!r}")
+		return problems
+	listing, sign = result["fetched"][2]["body"], result["fetched"][4]["body"]
+	if listing.get("provider") != "auto" or "module_id" in listing:
+		problems.append(f"listing body: {listing!r}")
+	if (sign.get("module_id"), sign.get("provider"), sign.get("certificate")) != ("test-wd", "watchdata", {"fingerprint_sha256": "a1" * 32}):
+		problems.append(f"sign body: {sign.get('module_id')!r} {sign.get('provider')!r} {sign.get('certificate')!r}")
+	if "pin" in json.dumps(sign).lower():
+		problems.append("a PIN key in the sign body")
+	prepare = [c for c in result["calls"] if c.get("method") == "erp_dsc_signer.api.signing.prepare_usb_signing"]
+	if not prepare or prepare[0]["args"] != {"name": "SINV-TEST-0001", "replace": 0, "provider": "auto"}:
+		problems.append(f"prepare args changed: {prepare!r}")
+	if [c for c in result["calls"] if "msgprint" in c]:
+		problems.append(f"the flow failed: {[c for c in result['calls'] if 'msgprint' in c]!r}")
+	return problems
+
+
 _AUTH_CALL = re.compile(r'const (\w+) = await frappe_request\("erp_dsc_signer\.api\.signing\.authenticate_usb_certificate"')
 
 
