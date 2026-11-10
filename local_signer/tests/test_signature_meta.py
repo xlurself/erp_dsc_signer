@@ -394,8 +394,8 @@ class TestSanitise(unittest.TestCase):
 		displays = (
 			"x" * 500,
 			"a\nb\n\nc",
-			"Digitally signed by Vinay Saraf\nDate: 2026.11.06 12:00:00 +05'30'",
-			"Digitally signed by VINAY KUMAR SARAF\nDate: 2026.11.06 23:59:59 -03'30'",
+			"Digitally signed by Test Signer\nDate: 2026.11.06 12:00:00 +05'30'",
+			"Digitally signed by TEST MIDDLE SIGNER\nDate: 2026.11.06 23:59:59 -03'30'",
 			"Digitally signed by \u0935\u093f\u091c\u092f \u0936\u0930\u094d\u092e\u093e",  # vijay sharma
 			"Digitally signed by J\u00f6rg M\u00fcller-\u00c5str\u00f6m [ACME] {x} <y> 50% #1",
 		)

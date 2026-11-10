@@ -66,9 +66,9 @@ that this certificate is not revoked, so the document was not signed. Check the 
 again."). Log line: reason_code + fingerprint only.
 
 ## 6. Tests (written first; each must be able to fail)
-Real-shaped fixtures: a generated test PKI (test root pinned via an injectable roots argument) plus ONE test with
-the real CCA India 2022 root + the real two SignX intermediates and the owner's real leaf stored as public test
-vectors, OCSP stubbed. Cases: unpinned root refused; chain incomplete; expired; wrong key usage; revoked (OCSP and
+Real-shaped fixtures: a generated test PKI (test root pinned via an injectable roots argument; generated at test time, no personal
+certificate is stored) plus tests with the real CCA India 2022 root and the real two SignX intermediates (public
+institutional certificates). No end-to-end test over a real end-entity certificate exists (2026-11-10). Cases: unpinned root refused; chain incomplete; expired; wrong key usage; revoked (OCSP and
 CRL); OCSP error + CRL good passes; both unavailable refuses; bad OCSP signature; stale OCSP; OCSP signed by
 non-delegated cert; hostile AIA/OCSP host (loopback, private IP, non-allowlisted, redirect) never fetched;
 oversize responses; fetched intermediate that does not chain is rejected; session not authenticated => complete

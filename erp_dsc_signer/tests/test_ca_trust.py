@@ -2,9 +2,11 @@
 
 Pure unittest. No frappe, no site, and NO live network: every fetch goes to a FakeNet test double,
 and the default HTTP transport is exercised only with a fake resolver and a fake socket.
-A generated test PKI (pinned through the explicit ``roots=`` argument) covers every negative case;
-one test uses the real CCA India 2022 root, the real SignX intermediates and the owner's real leaf
-(public certificates in tests/fixtures/) with OCSP stubbed.
+A generated test PKI (pinned through the explicit ``roots=`` argument) covers every negative case.
+A generated SignX-shaped chain whose leaf copies a real SignX Class 3 Individual DSC's profile
+(tests/_test_pki.py, no personal data) runs end to end. The real CCA India 2022 root and the real,
+public SignX intermediates (tests/fixtures/) are checked link by link; no real end-entity
+certificate is committed, so the library path verifier is never run over the real chain.
 """
 
 import ast
@@ -28,6 +30,7 @@ from cryptography.x509 import ocsp
 from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
 from cryptography.x509.verification import VerificationError
 
+from erp_dsc_signer.tests import _test_pki
 from erp_dsc_signer.utils import ca_trust, pinned_roots
 
 UTC = datetime.timezone.utc
@@ -40,7 +43,6 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 CCA_ROOT_SHA256 = "9a3fd3176798e842ddcb12c262f11cfacca70a8b84c6ea6fda30842a95a94cd8"
 SIGNX_CA_SHA256 = "a8d6363afeb8fe0fc8b627022954d5681872ea4d998e59b3d8395abcc3953452"
 SIGNX_SUB_SHA256 = "d29b3587cd540c45fdb29b416c73eec4c7311f721d037f16013a96ce55d4f824"
-OWNER_LEAF_SHA256 = "96cd11ced957520f876a4552cb739d22e5a01de4bd6949065834ae8bca17b76c"
 
 EXPECTED_REASONS = {
 	"NOT_CCA_TRUSTED",
@@ -1349,7 +1351,112 @@ class PinnedRootsTest(unittest.TestCase):
 				self.assertEqual(type(cm.exception).__name__, "PinnedRootError")
 
 
-# ---------------------------------------------------------------- real CCA India chain
+# ---------------------------------------------------------------- generated SignX-profile signer
+
+
+def signer_world(chain, *, ocsp_status="good", with_ocsp=True, crl_revoked=None):
+	"""FakeNet for the generated SignX-shaped chain: AIA served as SignX serves it, OCSP/CRL signed by the test keys."""
+	net = FakeNet()
+	u = _test_pki.URLS
+	net.routes[u["sub_cer"]] = base64.encodebytes(der(chain.sub))  # SignX serves AIA as base64 text
+	net.routes[u["ca_cer"]] = der(chain.ca)
+	net.routes[u["root_cer"]] = der(chain.root)
+	if with_ocsp:
+		net.routes[u["leaf_ocsp"]] = ocsp_bytes(chain.leaf, chain.sub, chain.sub_key, status=ocsp_status)
+		net.routes[u["sub_ocsp"]] = ocsp_bytes(chain.sub, chain.ca, chain.ca_key)
+		net.routes[u["ca_ocsp"]] = ocsp_bytes(chain.ca, chain.root, chain.root_key)
+	if crl_revoked is not None:
+		net.routes[u["leaf_crl"]] = crl_bytes(chain.sub, chain.sub_key, revoked=crl_revoked)
+	return net
+
+
+class SignerProfileChainTest(_Base):
+	"""A generated leaf with a real SignX Class 3 Individual DSC's profile, end to end through the public API.
+
+	Stands in for the owner's personal certificate, which is no longer committed. The generated root is pinned
+	through ``roots=``; OCSP answers are genuine responses signed by the generated issuers (no stub).
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self.chain = _test_pki.signer_chain()
+
+	def test_generated_leaf_has_the_signx_class3_individual_profile(self):
+		leaf = self.chain.leaf
+		ext = leaf.extensions
+		ku = ext.get_extension_for_class(x509.KeyUsage)
+		self.assertTrue(ku.critical)
+		self.assertTrue(ku.value.digital_signature and ku.value.content_commitment)
+		self.assertFalse(ku.value.key_cert_sign or ku.value.key_encipherment)
+		bc = ext.get_extension_for_class(x509.BasicConstraints)
+		self.assertTrue(bc.critical)
+		self.assertIs(bc.value.ca, False)
+		self.assertEqual(list(ext.get_extension_for_class(x509.ExtendedKeyUsage).value), list(_test_pki.SIGNER_EKU))
+		self.assertEqual(
+			ext.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.RFC822Name),
+			["test.signer@example.invalid"],
+		)
+		self.assertEqual(leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value, "Test Signer")
+		self.assertIsInstance(leaf.public_key(), rsa.RSAPublicKey)
+		self.assertEqual(leaf.public_key().key_size, 2048)
+		urls = (
+			ca_trust._aia_urls(leaf, AuthorityInformationAccessOID.CA_ISSUERS)
+			+ ca_trust._aia_urls(leaf, AuthorityInformationAccessOID.OCSP)
+			+ ca_trust._crl_urls(leaf)
+		)
+		u = _test_pki.URLS
+		self.assertEqual(urls, [u["sub_cer"], u["leaf_ocsp"], u["leaf_crl"]])
+		self.assertTrue(all(ca_trust.url_allowed(url, ca_trust.DEFAULT_ALLOWED_HOSTS) for url in urls))
+
+	def test_signer_profile_chain_passes_end_to_end(self):
+		c = self.chain
+		net = signer_world(c)
+		record = self.assertPasses(c.leaf, net, roots=[c.root])
+		self.assertEqual([e["sha256"] for e in record["chain"]], [sha(cert) for cert in c.path])
+		self.assertEqual(record["chain"][0]["subject_cn"], "Test Signer")
+		self.assertEqual(record["chain"][-1]["subject_cn"], "Test CCA Root")
+		self.assertEqual(record["root_sha256"], sha(c.root))
+		u = _test_pki.URLS
+		# AIA walk leaf -> sub-CA -> CA, then one OCSP query per link in chain order (leaf, sub-CA, CA).
+		self.assertEqual(net.urls(), [u["sub_cer"], u["ca_cer"], u["leaf_ocsp"], u["sub_ocsp"], u["ca_ocsp"]])
+		self.assertEqual(
+			[(r["method"], r["status"], r["responder_host"]) for r in record["revocation"]],
+			[("ocsp", "good", "ocsp.signxca.com"), ("ocsp", "good", "ocsp.signxca.com"), ("ocsp", "good", "ocvs.gov.in")],
+		)
+
+	def test_signer_profile_negative_controls(self):
+		c = self.chain
+		u = _test_pki.URLS
+		with self.subTest("expired the day after notAfter"):
+			after = datetime.datetime(2028, 7, 21, tzinfo=UTC)
+			self.assertRefused("EXPIRED_OR_NOT_YET_VALID", c.leaf, signer_world(c), roots=[c.root], now=after)
+		with self.subTest("not yet valid the day before notBefore"):
+			ca_trust.clear_cache()
+			before = datetime.datetime(2026, 7, 19, tzinfo=UTC)
+			self.assertRefused("EXPIRED_OR_NOT_YET_VALID", c.leaf, signer_world(c), roots=[c.root], now=before)
+		with self.subTest("default pinned CCA India root: the generated root is not trusted"):
+			ca_trust.clear_cache()
+			net = signer_world(c)
+			self.assertRefused("NOT_CCA_TRUSTED", c.leaf, net, roots=None)
+			self.assertEqual(net.urls(), [u["sub_cer"], u["ca_cer"], u["root_cer"]])
+		with self.subTest("another root pinned"):
+			ca_trust.clear_cache()
+			self.assertRefused("NOT_CCA_TRUSTED", c.leaf, signer_world(c), roots=[MAIN.root])
+		with self.subTest("leaf revoked by OCSP"):
+			ca_trust.clear_cache()
+			self.assertRefused("REVOKED", c.leaf, signer_world(c, ocsp_status="revoked"), roots=[c.root])
+		with self.subTest("leaf revoked by CRL, OCSP unreachable"):
+			ca_trust.clear_cache()
+			net = signer_world(c, with_ocsp=False, crl_revoked=[c.leaf.serial_number])
+			self.assertRefused("REVOKED", c.leaf, net, roots=[c.root])
+		with self.subTest("revocation unavailable"):
+			ca_trust.clear_cache()
+			net = signer_world(c, with_ocsp=False)
+			self.assertRefused("REVOCATION_UNAVAILABLE", c.leaf, net, roots=[c.root])
+			self.assertEqual(net.urls(), [u["sub_cer"], u["ca_cer"], u["leaf_ocsp"], u["leaf_crl"]])
+
+
+# ---------------------------------------------------------------- real CCA India chain (public certificates only)
 
 
 def _fixture(name):
@@ -1357,82 +1464,139 @@ def _fixture(name):
 		return fh.read()
 
 
-def _ocsp_url(cert):
-	aia = cert.extensions.get_extension_for_class(x509.AuthorityInformationAccess).value
-	return next(d.access_location.value for d in aia if d.access_method == AuthorityInformationAccessOID.OCSP)
-
-
 class RealCCAChainTest(_Base):
+	"""The real pinned CCA India 2022 root and the real SignX intermediates (public, institutional certificates).
+
+	No real end-entity certificate is committed, and none can be generated under the real SignX sub-CA, so the
+	library path verifier (ca_trust._verify_path) is not run over the real chain. Proven here instead, on the real
+	certificates: AIA path building from the real sub-CA up to the pinned root, the signature of every real link,
+	validity windows, the real AIA/OCSP/CRL URLs against the default allowlist, and that a leaf or sub-CA forged
+	under a real SignX name is refused through the public API with the default (pinned) roots.
+	"""
+
 	LEAF_AIA = "https://signxca.com/repository/aia/SignXClass3Individual.cer"
+	LEAF_OCSP = "http://ocsp.signxca.com/SignXClass3Individual"
+	LEAF_CRL = "https://signxca.com/repository/crl/SignXClass3Individual.crl"
 	SUB_AIA = "https://signxca.com/repository/aia/SignXRootCA2022.cer"
+	SUB_OCSP = "http://ocsp.signxca.com/SignXRootCA2022"
+	SUB_CRL = "https://signxca.com/repository/crl/SignXRootCA2022.crl"
 	ROOT_AIA = "http://www.cca.gov.in/cca/sites/default/files/files/CCAIndia2022.cer"
+	CA_OCSP = "http://ocvs.gov.in"
+	CA_CRL = "http://cca.gov.in/rw/resources/CCAIndia2022Latest.crl"
 
 	def setUp(self):
 		super().setUp()
-		self.leaf_der = _fixture("owner_leaf_signx_class3_individual.der")
 		self.sub_der = _fixture("signx_sub_ca_class3_individual_2022.der")
 		self.ca_der = _fixture("signx_ca_2022.der")
-		self.assertEqual(hashlib.sha256(self.leaf_der).hexdigest(), OWNER_LEAF_SHA256)
 		self.assertEqual(hashlib.sha256(self.sub_der).hexdigest(), SIGNX_SUB_SHA256)
 		self.assertEqual(hashlib.sha256(self.ca_der).hexdigest(), SIGNX_CA_SHA256)
+		self.sub = x509.load_der_x509_certificate(self.sub_der)
+		self.ca = x509.load_der_x509_certificate(self.ca_der)
+		self.root = pinned_roots.PINNED_ROOTS[0]
 
 	def net(self):
 		net = FakeNet()
-		net.routes[self.LEAF_AIA] = base64.encodebytes(self.sub_der)
+		net.routes[self.LEAF_AIA] = base64.encodebytes(self.sub_der)  # SignX serves AIA as base64 text
 		net.routes[self.SUB_AIA] = self.ca_der
 		return net
 
-	def stub_ocsp(self, result="good"):
-		calls = []
+	@staticmethod
+	def network(net):
+		return ca_trust._Network(net, ca_trust.DEFAULT_ALLOWED_HOSTS)
 
-		def fake(cert, issuer, now, net):
-			calls.append((sha(cert), sha(issuer)))
-			if result != "good":
-				return None
-			return "good", ca_trust._revocation_entry(cert, "ocsp", _ocsp_url(cert), now)
-
-		return calls, mock.patch.object(ca_trust, "_check_ocsp", side_effect=fake)
-
-	def test_real_cca_india_chain_passes_with_stubbed_ocsp(self):
-		calls, patcher = self.stub_ocsp()
+	def test_real_signx_intermediates_chain_to_the_pinned_cca_india_root(self):
 		net = self.net()
-		with patcher:
-			record = ca_trust.authenticate_certificate(self.leaf_der, now=NOW, fetch=net)  # default = pinned CCA root
-		self.assertIs(record["verified"], True)
-		self.assertEqual(
-			[c["sha256"] for c in record["chain"]], [OWNER_LEAF_SHA256, SIGNX_SUB_SHA256, SIGNX_CA_SHA256, CCA_ROOT_SHA256]
+		path, anchor = ca_trust._build_path(self.sub, tuple(pinned_roots.PINNED_ROOTS), self.network(net))
+		self.assertEqual([sha(cert) for cert in path], [SIGNX_CA_SHA256])
+		self.assertEqual(sha(anchor), CCA_ROOT_SHA256)
+		self.assertEqual(ca_trust._common_name(anchor), "CCA India 2022")
+		self.assertEqual(net.urls(), [self.SUB_AIA])
+		# each real link is signed by its real issuer's key, and by nothing else
+		self.assertTrue(ca_trust._directly_issued(self.sub, self.ca))
+		self.assertTrue(ca_trust._directly_issued(self.ca, self.root))
+		self.assertFalse(ca_trust._directly_issued(self.sub, self.root))
+		self.assertFalse(ca_trust._directly_issued(self.ca, self.sub))
+		for cert in (self.sub, self.ca, self.root):
+			ca_trust._require_valid_at(cert, NOW)
+		# the real AIA bodies parse in the encodings the real servers use
+		self.assertEqual(sha(ca_trust._parse_fetched_certificate(base64.encodebytes(self.sub_der))), SIGNX_SUB_SHA256)
+		self.assertEqual(sha(ca_trust._parse_fetched_certificate(self.ca_der)), SIGNX_CA_SHA256)
+
+	def test_real_intermediates_revocation_endpoints_are_allowlisted_and_queried_in_order(self):
+		urls = [
+			url
+			for cert in (self.sub, self.ca)
+			for url in (
+				ca_trust._aia_urls(cert, AuthorityInformationAccessOID.CA_ISSUERS)
+				+ ca_trust._aia_urls(cert, AuthorityInformationAccessOID.OCSP)
+				+ ca_trust._crl_urls(cert)
+			)
+		]
+		self.assertEqual(urls, [self.SUB_AIA, self.SUB_OCSP, self.SUB_CRL, self.ROOT_AIA, self.CA_OCSP, self.CA_CRL])
+		self.assertTrue(all(ca_trust.url_allowed(url, ca_trust.DEFAULT_ALLOWED_HOSTS) for url in urls))
+		# Nothing answers (no real responder key is available): the real OCSP then CRL endpoints of each real link
+		# are queried through the URL policy, and the link is refused as unconfirmed.
+		links = (
+			(self.sub, self.ca, [self.SUB_OCSP, self.SUB_CRL]),
+			(self.ca, self.root, [self.CA_OCSP, self.CA_CRL]),
 		)
-		self.assertEqual(record["root_sha256"], CCA_ROOT_SHA256)
-		self.assertEqual(record["chain"][-1]["subject_cn"], "CCA India 2022")
-		self.assertEqual(
-			calls,
-			[(OWNER_LEAF_SHA256, SIGNX_SUB_SHA256), (SIGNX_SUB_SHA256, SIGNX_CA_SHA256), (SIGNX_CA_SHA256, CCA_ROOT_SHA256)],
-		)
-		self.assertEqual(net.urls(), [self.LEAF_AIA, self.SUB_AIA])
-		self.assertEqual(
-			[r["responder_host"] for r in record["revocation"]], ["ocsp.signxca.com", "ocsp.signxca.com", "ocvs.gov.in"]
-		)
+		for cert, issuer, expected in links:
+			with self.subTest(sha(cert)):
+				net = FakeNet()
+				with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+					ca_trust._revocation_status(cert, issuer, NOW, self.network(net))
+				self.assertEqual(cm.exception.reason_code, "REVOCATION_UNAVAILABLE")
+				self.assertEqual(net.urls(), expected)
+				self.assertEqual(net.calls[0]["content_type"], "application/ocsp-request")
 
 	def test_real_chain_negative_controls(self):
-		calls, patcher = self.stub_ocsp()
-		with patcher:
-			with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
-				ca_trust.authenticate_certificate(
-					self.leaf_der, now=datetime.datetime(2028, 7, 21, tzinfo=UTC), fetch=self.net()
-				)
-			self.assertEqual(cm.exception.reason_code, "EXPIRED_OR_NOT_YET_VALID")
-			ca_trust.clear_cache()
+		with self.subTest("real sub-CA expired / not yet valid"):
+			for when in (datetime.datetime(2032, 8, 27, tzinfo=UTC), datetime.datetime(2022, 8, 29, tzinfo=UTC)):
+				with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+					ca_trust._require_valid_at(self.sub, when)
+				self.assertEqual(cm.exception.reason_code, "EXPIRED_OR_NOT_YET_VALID")
+		with self.subTest("another root pinned: the real CCA root fetched over AIA is self-issued but not pinned"):
 			net = self.net()
-			net.routes[self.ROOT_AIA] = der(pinned_roots.PINNED_ROOTS[0])
+			net.routes[self.ROOT_AIA] = der(self.root)
 			with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
-				ca_trust.authenticate_certificate(self.leaf_der, now=NOW, fetch=net, roots=[MAIN.root])
+				ca_trust._build_path(self.sub, (MAIN.root,), self.network(net))
 			self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
-		ca_trust.clear_cache()
-		calls, patcher = self.stub_ocsp(result="unavailable")
-		with patcher:
-			with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
-				ca_trust.authenticate_certificate(self.leaf_der, now=NOW, fetch=self.net())
-		self.assertEqual(cm.exception.reason_code, "REVOCATION_UNAVAILABLE")
+			self.assertEqual(net.urls(), [self.SUB_AIA, self.ROOT_AIA])
+
+	def test_leaf_claiming_the_real_signx_sub_ca_is_refused_with_the_pinned_roots(self):
+		leaf, _ = _test_pki.make_signer_leaf(
+			self.sub.subject, _test_pki.rsa_key(), ca_issuers=self.LEAF_AIA, ocsp_url=self.LEAF_OCSP, crl_url=self.LEAF_CRL
+		)
+		net = self.net()
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust.authenticate_certificate(der(leaf), now=NOW, fetch=net)  # default = pinned CCA root
+		# CHAIN_INCOMPLETE: the real base64 AIA answer parsed, but the real sub-CA did not sign this leaf
+		# (an unparseable answer would be CA_FETCH_FAILED).
+		self.assertEqual(cm.exception.reason_code, "CHAIN_INCOMPLETE")
+		self.assertEqual(net.urls(), [self.LEAF_AIA])
+
+	def test_sub_ca_forged_under_the_real_signx_ca_name_is_refused_with_the_pinned_roots(self):
+		forged_key = _test_pki.rsa_key()
+		forged_sub = make_cert(
+			"forged",
+			forged_key,
+			subject=self.sub.subject,
+			issuer=self.ca,
+			issuer_key=_test_pki.rsa_key(),
+			ca=True,
+			pathlen=0,
+			ku="ca",
+			eku=(),
+			aia_ca=[self.SUB_AIA],
+		)
+		forged_url = "https://signxca.com/test-pki/forged/sub.cer"
+		leaf, _ = _test_pki.make_signer_leaf(forged_sub.subject, forged_key, ca_issuers=forged_url)
+		net = self.net()
+		net.routes[forged_url] = der(forged_sub)
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust.authenticate_certificate(der(leaf), now=NOW, fetch=net)
+		self.assertEqual(cm.exception.reason_code, "CHAIN_INCOMPLETE")  # the real SignX CA did not sign it
+		self.assertEqual(net.urls(), [forged_url, self.SUB_AIA])
 
 
 if __name__ == "__main__":

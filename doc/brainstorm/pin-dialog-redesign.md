@@ -16,7 +16,7 @@ Status: proposal 2026-11-10. The PIN dialog is security-critical (BRD 001, panel
 |                                                  |
 |  Requested by    http://om-erp-v14.local:8014    |   (origin: large, never elided, unchanged rule)
 |  Document        XL-SI-26-0000013                |   (NEW, from the verified signing request)
-|  Certificate     Vinay Saraf  (valid to 2027-..) |   (NEW, from the authenticated certificate)
+|  Certificate     Test Signer  (valid to 2027-..) |   (NEW, from the authenticated certificate)
 |  Authenticated   CCA India chain, not revoked    |   (NEW, only shown if the server verified it)
 |                                                  |
 |  Token PIN                                       |

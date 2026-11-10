@@ -30,13 +30,14 @@ from cryptography.x509.oid import NameOID
 from endesive.pdf import cms as endesive_cms
 
 from erp_dsc_signer.api import signing
+from erp_dsc_signer.tests import _test_pki
 from erp_dsc_signer.utils import ca_trust, pdf_signer, usb_signer
 from erp_dsc_signer.utils.usb_signer import USBSignatureError
 
 SENTINEL = "S3NT1NEL-PIN-9981"
 USER = "signer@example.com"
 FIXTURES = Path(__file__).parent / "fixtures"
-LEAF_DER = (FIXTURES / "owner_leaf_signx_class3_individual.der").read_bytes()
+LEAF_DER = _test_pki.signer_chain().leaf_der  # generated SignX-profile DSC, CN "Test Signer" (no personal data)
 LEAF_SHA = hashlib.sha256(LEAF_DER).hexdigest()
 OTHER_DER = (FIXTURES / "signx_ca_2022.der").read_bytes()  # a different real certificate
 OTHER_SHA = hashlib.sha256(OTHER_DER).hexdigest()
@@ -343,7 +344,7 @@ class TestAuthenticateEndpoint(_Base):
 	def test_signature_stamp_names_the_authenticated_certificate_holder(self):
 		result = self.authenticate(self.prepare())
 		signing._signature_metadata.assert_called_once()
-		self.assertEqual("Vinay Saraf", signing._signature_metadata.call_args.args[2])
+		self.assertEqual("Test Signer", signing._signature_metadata.call_args.args[2])
 		self.assertEqual({"name": "signer"}, result["signature_meta"])
 
 	def test_prepare_does_not_stamp_a_generic_signer_name(self):
@@ -966,13 +967,14 @@ class TestRealCaTrustIntegration(_Base):
 
 		self._patch(ca_trust, "HttpTransport", return_value=refuse)
 
-	def test_real_owner_leaf_cannot_be_authenticated_offline_so_session_is_not_marked(self):
+	def test_signer_profile_leaf_cannot_be_authenticated_offline_so_session_is_not_marked(self):
 		prepared = self.prepare()
 		with self.assertRaises(_Thrown) as ctx:
 			self.authenticate(prepared)
 		self.assertEqual(ca_trust.MESSAGES["CA_FETCH_FAILED"], str(ctx.exception))
 		self.assertNotIn("authenticated", self.session(prepared))
 		self.assertTrue(self.urls)  # it tried the AIA address, through the injected transport only
+		self.assertEqual([_test_pki.URLS["sub_cer"]], self.urls)
 		self.assertTrue(all(url.startswith(("http://", "https://")) for url in self.urls))
 		with self.assertRaises(_Thrown):
 			self.complete(prepared)
