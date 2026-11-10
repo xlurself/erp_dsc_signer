@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import erp_dsc_local
+from _probe_inproc import use_in_process_probe
 from erp_dsc_local.errors import LocalSignerError, PinIncorrect, PinLocked, PinRateLimited, TokenBusy, TokenUnavailable
 from erp_dsc_local.token import (
 	KEY_NOT_AVAILABLE,
@@ -267,10 +268,12 @@ def two_slot_lib(slot1_serial="SER-1", slot2_serial="SER-2   "):
 
 
 def make_client(lib):
+	"""A real TokenClient over ``lib``: the PIN-free reads run through the real probe
+	protocol in-process (``_probe_inproc``); the sign path uses ``lib`` directly."""
 	client = TokenClient.__new__(TokenClient)
 	client.lib, client.pk = lib, PK
-	client.module = SimpleNamespace(label="libwdpkcs.dylib")
-	return client
+	client.module = SimpleNamespace(label="libwdpkcs.dylib", path="/Library/WD/libwdpkcs.dylib")
+	return use_in_process_probe(client)
 
 
 def chain(error):
