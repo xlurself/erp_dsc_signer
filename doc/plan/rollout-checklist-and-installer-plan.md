@@ -46,6 +46,8 @@ Each row needs a recorded PASS/FAIL with date and tester. PINs are never recorde
 
 ## 3. Installer plan
 
+> Superseded by the full plan in `doc/plan/installer-plan.md` (2026-11-10). The short list below is kept for history.
+
 Goal: a user installs once, with no Python knowledge and (where possible) no admin rights.
 
 1. **Package the daemon as a single app.** Build with PyInstaller (includes Python, tkinter, PyKCS11, cryptography). One build per OS: Windows x64, macOS arm64/x64. Risk: tkinter dialogs and the child-process dialog model must be re-tested inside the frozen build (the macOS child-process rule from F1 still applies).
