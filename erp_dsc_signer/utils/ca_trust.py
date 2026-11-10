@@ -210,7 +210,13 @@ def _require_leaf_profile(leaf):
 
 
 def _build_path(leaf, anchors, net):
-	"""Collect candidate intermediates from the cache or AIA until a pinned root issued the last one."""
+	"""Collect candidate intermediates from the cache or AIA until a pinned root's key directly signed the last one.
+
+	Each candidate must be signed by the key of the certificate below it. Self-issued key-rollover certificates
+	are followed; a self-signed certificate ends the walk (NOT_CCA_TRUSTED); at most MAX_INTERMEDIATES
+	certificates, self-issued ones included, and no certificate twice. The anchor returned is always one of
+	``anchors`` (pinned), never a downloaded certificate.
+	"""
 	path = []
 	current = leaf
 	seen = {_sha256(leaf)}
@@ -218,9 +224,12 @@ def _build_path(leaf, anchors, net):
 		anchor = _issuing_anchor(current, anchors)
 		if anchor is not None:
 			return path, anchor
-		if current.subject == current.issuer:
-			raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")  # a self-issued root that is not pinned
-		if len(path) >= MAX_INTERMEDIATES:
+		if _self_signed(current):
+			# Self-SIGNED and no pinned key signed it: a root of its own (even if it copies a pinned name).
+			# It ends the walk and never becomes an anchor. A self-ISSUED certificate signed by another key
+			# (a CA key rollover, RFC 5280 s6.1) is not a root and is followed like any intermediate.
+			raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")
+		if len(path) >= MAX_INTERMEDIATES:  # self-issued intermediates count here: a hard bound on downloads
 			raise CertificateNotAuthenticated("CHAIN_INCOMPLETE")
 		issuer = _cached_issuer(current) or _fetch_issuer(current, net)
 		fingerprint = _sha256(issuer)
@@ -232,16 +241,16 @@ def _build_path(leaf, anchors, net):
 
 
 def _issuing_anchor(cert, anchors):
-	same_name = False
+	"""The pinned root whose own key directly signed ``cert`` (names DER-equal), else None.
+
+	A name match alone decides nothing: a certificate issued under a pinned root's name but signed by another
+	key may sit below that root's self-issued key-rollover certificate, so the walk follows its AIA. Trust is
+	still only a pinned key's signature; anything else ends as CHAIN_INCOMPLETE, CA_FETCH_FAILED or, at a
+	self-signed certificate, NOT_CCA_TRUSTED.
+	"""
 	for anchor in anchors:
-		if anchor.subject != cert.issuer:
-			continue
-		same_name = True
-		if _directly_issued(cert, anchor):
+		if anchor.subject == cert.issuer and _directly_issued(cert, anchor):
 			return anchor
-	if same_name:
-		# The issuer name copies a pinned root but another key signed it: never follow it further.
-		raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")
 	return None
 
 
@@ -316,7 +325,8 @@ def _validate_path(chain, anchors, now):
 	x509.verification client verifier, a TLS profile that demanded a SAN and clientAuth a CMS/PDF signing
 	certificate does not need. Checks: the last certificate is a pinned root by DER; no repeated certificate
 	and at most MAX_INTERMEDIATES intermediates; the leaf profile (KEY_USAGE, CERTIFICATE_PROFILE); every
-	certificate valid at ``now``; every CA (the root included): cA, pathLenConstraint, keyCertSign when
+	certificate valid at ``now``; no self-signed intermediate; every CA (the root included): cA,
+	pathLenConstraint counting only non-self-issued intermediates (RFC 5280 s4.2.1.9), keyCertSign when
 	keyUsage is present, understood critical extensions, strong key; every link: issuer name encoded exactly
 	as the issuer's subject, strong signature hash, and the issuer's key verifies the signature.
 	"""
@@ -331,13 +341,45 @@ def _validate_path(chain, anchors, now):
 	_require_leaf_profile(chain[0])
 	for cert in chain:
 		_require_valid_at(cert, now)
+	below = _real_intermediates_below(chain)
 	for position in range(1, len(chain)):
-		_require_issuing_ca(chain[position], position - 1)
+		_require_issuing_ca(chain[position], below[position - 1])
 		_require_link(chain[position - 1], chain[position])
+		if position < len(chain) - 1 and _self_signed(chain[position]):
+			# A self-signed certificate is a root: never an intermediate link (a self-issued rollover
+			# certificate is signed by ANOTHER key and is allowed).
+			raise CertificateNotAuthenticated("NOT_CCA_TRUSTED")
+
+
+def _self_issued(cert):
+	"""Issuer and subject are the same name (RFC 5280 s6.1), compared as DER like every name in the path."""
+	return cert.issuer.public_bytes() == cert.subject.public_bytes()
+
+
+def _self_signed(cert):
+	"""Self-issued AND signed by its own key: a root. (A rollover certificate is self-issued, signed by another key.)"""
+	return _self_issued(cert) and _directly_issued(cert, cert)
+
+
+def _real_intermediates_below(chain):
+	"""For each CA ``chain[1:]``, the number of NON-self-issued intermediates between it and the leaf.
+
+	pathLenConstraint is "the maximum number of non-self-issued intermediate certificates that may follow this
+	certificate" (RFC 5280 s4.2.1.9); this count is exactly what s6.1.4(l)/(m) enforce by decrementing
+	max_path_length only for non-self-issued certificates. The leaf is never counted. Self-issued certificates
+	still count against MAX_INTERMEDIATES (checked on the path length itself).
+	"""
+	counts, real = [], 0
+	for position in range(1, len(chain)):
+		counts.append(real)
+		if not _self_issued(chain[position]):
+			real += 1
+	return counts
 
 
 def _require_issuing_ca(cert, intermediates_below):
-	"""``cert`` issues certificates: cA, pathLen (CAs between it and the leaf), keyCertSign, extensions, key."""
+	"""``cert`` issues certificates: cA, pathLen (``intermediates_below`` = non-self-issued intermediates
+	between it and the leaf), keyCertSign, extensions, key."""
 	constraints = _extension(cert, x509.BasicConstraints)
 	key_usage = _extension(cert, x509.KeyUsage)
 	if (

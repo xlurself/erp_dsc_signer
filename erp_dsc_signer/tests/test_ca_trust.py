@@ -413,7 +413,11 @@ class ChainTrustTest(_Base):
 		leaf = fake.leaf()
 		net = world(fake, leaf)
 		self.assertRefused("NOT_CCA_TRUSTED", leaf, net, roots=[MAIN.root])
-		self.assertNotIn(fake.u["root_cer"], net.urls())
+		# R2 iteration 4: a pinned-name match without the pinned key's signature is followed (it may sit below a
+		# self-issued key-rollover certificate), so the fake root IS downloaded now; being self-signed and not
+		# signed by a pinned key it ends the walk as NOT_CCA_TRUSTED, is never an anchor and is never cached.
+		self.assertEqual(net.urls(), [fake.u["sub_cer"], fake.u["ca_cer"], fake.u["root_cer"]])
+		self.assertEqual(ca_trust._INTERMEDIATE_CACHE, {})
 
 	def test_chain_incomplete_without_aia(self):
 		leaf = MAIN.leaf(aia_ca=())
@@ -1897,6 +1901,307 @@ class SigningPathValidatorTest(_Base):
 			ca_trust, "_directly_issued", return_value=True
 		):
 			self.assertIsNone(self.validate(self.path()))
+
+
+# ---------------------------------------------------------------- CA key rollover (R2 iteration 4)
+
+RO = {  # rollover test addresses, all on allowlisted hosts
+	"root_cer": "http://www.cca.gov.in/test-pki/rollover/Root.cer",
+	"x_cer": "https://signxca.com/test-pki/rollover/X.cer",
+	"x_ocsp": "http://ocvs.gov.in/test-pki/rollover/X",
+	"x_crl": "http://cca.gov.in/test-pki/rollover/X.crl",
+	"s_cer": "https://signxca.com/test-pki/rollover/S.cer",
+	"s_ocsp": "http://ocsp.signxca.com/test-pki/rollover/S",
+	"s_crl": "https://signxca.com/test-pki/rollover/S.crl",
+	"t_cer": "https://signxca.com/test-pki/rollover/T.cer",
+	"t_ocsp": "http://ocsp.signxca.com/test-pki/rollover/T",
+	"t_crl": "https://signxca.com/test-pki/rollover/T.crl",
+	"leaf_ocsp": "http://ocsp.signxca.com/test-pki/rollover/leaf",
+	"leaf_crl": "https://signxca.com/test-pki/rollover/leaf.crl",
+}
+
+
+class KeyRolloverTest(_Base):
+	"""Self-issued intermediates (RFC 5280 s6.1): a CA's new-key certificate signed by its old key, same name.
+
+	Root-level rollover: pinned root (old key) -> X (root's name, NEW key, signed by the old key) -> sub-CA S
+	(issuer = root's name, signed by the NEW key) -> leaf. The leaf's AIA serves S, S's AIA serves X; X is
+	directly signed by the pinned root. Sub-CA-level rollover: leaf -> S1 (sub-CA's name, new key, signed by the
+	sub-CA's old key) -> sub-CA -> CA -> root. Self-issued intermediates do not count against pathLenConstraint
+	(RFC 5280 s4.2.1.9, s6.1.4(l)) but do count against MAX_INTERMEDIATES (a hard bound).
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		cls.new_key = _test_pki.rsa_key()  # the root's (or sub-CA's) NEW key
+		cls.t_key = _test_pki.rsa_key()
+
+	def setUp(self):
+		super().setUp()
+		self.c = _test_pki.signer_chain()
+
+	def root(self, pathlen=None):
+		if pathlen is None:
+			return self.c.root
+		return _test_pki.make_ca(
+			"unused", self.c.root_key, None, None, pathlen=pathlen, subject=self.c.root.subject, validity=_test_pki._VALIDITY["root"]
+		)
+
+	def rollover(self, *, root_pathlen=None, x_pathlen=None, s_pathlen=0, with_t=False, x_signer_key=None, **x_kw):
+		"""(chain, keys): leaf -> [T ->] S -> X (self-issued) -> root; keys[i] signs what chain[i] issues."""
+		c = self.c
+		root = self.root(root_pathlen)
+		x = _test_pki.make_ca(
+			"unused", self.new_key, root, x_signer_key or c.root_key, pathlen=x_pathlen, subject=root.subject,
+			validity=_test_pki._VALIDITY["ca"], locations=(RO["root_cer"], RO["x_ocsp"], RO["x_crl"]), **x_kw,
+		)
+		s = _test_pki.make_ca("Rollover Sub-CA", c.sub_key, x, self.new_key, pathlen=s_pathlen, locations=(RO["x_cer"], RO["s_ocsp"], RO["s_crl"]))
+		chain, keys = [s, x, root], [c.sub_key, self.new_key, c.root_key]
+		if with_t:
+			t = _test_pki.make_ca("Rollover Sub-sub-CA", self.t_key, s, c.sub_key, pathlen=0, locations=(RO["s_cer"], RO["t_ocsp"], RO["t_crl"]))
+			chain, keys = [t, *chain], [self.t_key, *keys]
+		issuer_url = RO["t_cer"] if with_t else RO["s_cer"]
+		leaf = _test_pki.make_signer_leaf(
+			chain[0].subject, keys[0], key=c.leaf_key, ca_issuers=issuer_url, ocsp_url=RO["leaf_ocsp"], crl_url=RO["leaf_crl"]
+		)[0]
+		return [leaf, *chain], [c.leaf_key, *keys]
+
+	def sub_rollover(self, *, with_t=False):
+		"""leaf -> [T ->] S1 (self-issued: the sub-CA's name, new key, signed by the sub-CA's key) -> sub -> CA -> root."""
+		c = self.c
+		s1 = _test_pki.make_ca(
+			"unused", self.new_key, c.sub, c.sub_key, pathlen=None, subject=c.sub.subject, locations=(_test_pki.URLS["sub_cer"], RO["s_ocsp"], RO["s_crl"])
+		)
+		chain, keys = [s1, c.sub, c.ca, c.root], [self.new_key, c.sub_key, c.ca_key, c.root_key]
+		issuer_url = RO["s_cer"]
+		if with_t:
+			t = _test_pki.make_ca("Rollover Sub-sub-CA", self.t_key, s1, self.new_key, pathlen=0, locations=(RO["s_cer"], RO["t_ocsp"], RO["t_crl"]))
+			chain, keys, issuer_url = [t, *chain], [self.t_key, *keys], RO["t_cer"]
+		leaf = _test_pki.make_signer_leaf(
+			chain[0].subject, keys[0], key=c.leaf_key, ca_issuers=issuer_url, ocsp_url=RO["leaf_ocsp"], crl_url=RO["leaf_crl"]
+		)[0]
+		return [leaf, *chain], [c.leaf_key, *keys]
+
+	@staticmethod
+	def world(chain, keys, *, with_ocsp=True, with_crl=True):
+		"""AIA serves every issuer at the child's caIssuers URL; genuine OCSP and CRL answers for every non-root link."""
+		net = FakeNet()
+		for index in range(len(chain) - 1):
+			child, issuer, issuer_key = chain[index], chain[index + 1], keys[index + 1]
+			for url in ca_trust._aia_urls(child, AuthorityInformationAccessOID.CA_ISSUERS):
+				net.routes[url] = base64.encodebytes(der(issuer))
+			if with_ocsp:
+				for url in ca_trust._aia_urls(child, AuthorityInformationAccessOID.OCSP):
+					net.routes[url] = ocsp_bytes(child, issuer, issuer_key)
+			if with_crl:
+				for url in ca_trust._crl_urls(child):
+					net.routes[url] = crl_bytes(issuer, issuer_key)
+		return net
+
+	def assertChainPasses(self, chain, keys, **kw):
+		net = self.world(chain, keys, **kw)
+		record = self.assertPasses(chain[0], net, roots=[chain[-1]])
+		self.assertEqual([e["sha256"] for e in record["chain"]], [sha(cert) for cert in chain])
+		self.assertEqual(len(record["revocation"]), len(chain) - 1)
+		for url in (RO["root_cer"], _test_pki.URLS["root_cer"]):
+			self.assertNotIn(url, net.urls())  # the pinned root is never downloaded
+		return record, net
+
+	def assertChainRefused(self, code, chain, keys, roots=None):
+		net = self.world(chain, keys)
+		self.assertRefused(code, chain[0], net, roots=roots or [chain[-1]])
+		self.assertEqual(ca_trust._INTERMEDIATE_CACHE, {})
+		return net
+
+	# -- positive controls
+
+	def test_root_key_rollover_passes_end_to_end_with_ocsp_and_with_crl(self):
+		chain, keys = self.rollover()
+		leaf, s, x, root = chain
+		self.assertEqual(x.subject, x.issuer)  # self-issued ...
+		self.assertFalse(ca_trust._directly_issued(x, x))  # ... but not self-signed: the OLD key signed the NEW key
+		self.assertFalse(ca_trust._directly_issued(s, root))  # the pinned key did not sign the sub-CA
+		record, net = self.assertChainPasses(chain, keys)
+		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"], RO["leaf_ocsp"], RO["s_ocsp"], RO["x_ocsp"]])
+		self.assertEqual([r["method"] for r in record["revocation"]], ["ocsp"] * 3)
+		with self.subTest("CRL only"):
+			ca_trust.clear_cache()
+			record, net = self.assertChainPasses(chain, keys, with_ocsp=False)
+			self.assertEqual([r["method"] for r in record["revocation"]], ["crl"] * 3)
+		with self.subTest("verified rollover certificate is cached and reused"):
+			net = self.world(chain, keys)
+			self.assertPasses(leaf, net, roots=[root])
+			self.assertNotIn(RO["x_cer"], net.urls())
+
+	def test_sub_ca_key_rollover_passes_end_to_end(self):
+		chain, keys = self.sub_rollover()
+		self.assertEqual(chain[1].subject, chain[1].issuer)
+		# the sub-CA's pathLenConstraint is 0 and S1 is below it: accepted only because S1 is self-issued
+		self.assertEqual(chain[2].extensions.get_extension_for_class(x509.BasicConstraints).value.path_length, 0)
+		self.assertChainPasses(chain, keys)
+
+	# -- pathLenConstraint: self-issued intermediates are not counted (both sides of each boundary)
+
+	def test_path_length_boundaries_with_a_self_issued_intermediate(self):
+		with self.subTest("root pathLen 1: S counted, X (self-issued) not -> accepted at the limit"):
+			self.assertChainPasses(*self.rollover(root_pathlen=1))
+		with self.subTest("root pathLen 0: S is one real intermediate too many -> refused"):
+			ca_trust.clear_cache()
+			self.assertChainRefused("NOT_CCA_TRUSTED", *self.rollover(root_pathlen=0))
+		with self.subTest("root pathLen 1 with T below S: two real intermediates -> refused"):
+			ca_trust.clear_cache()
+			self.assertChainRefused("NOT_CCA_TRUSTED", *self.rollover(root_pathlen=1, s_pathlen=None, with_t=True))
+		with self.subTest("root pathLen 2 with T below S -> accepted at the limit"):
+			ca_trust.clear_cache()
+			self.assertChainPasses(*self.rollover(root_pathlen=2, s_pathlen=None, with_t=True))
+		with self.subTest("X pathLen 0: S below it -> refused"):
+			ca_trust.clear_cache()
+			self.assertChainRefused("NOT_CCA_TRUSTED", *self.rollover(x_pathlen=0))
+		with self.subTest("X pathLen 1: S below it -> accepted"):
+			ca_trust.clear_cache()
+			self.assertChainPasses(*self.rollover(x_pathlen=1))
+		with self.subTest("sub-CA pathLen 0 with self-issued S1 and a real T below -> refused"):
+			ca_trust.clear_cache()
+			self.assertChainRefused("NOT_CCA_TRUSTED", *self.sub_rollover(with_t=True))
+
+	def test_path_length_counts_follow_rfc5280(self):
+		chain, _ = self.rollover(root_pathlen=1)  # leaf, S, X, root
+		self.assertEqual([ca_trust._self_issued(cert) for cert in chain], [False, False, True, True])
+		self.assertEqual(ca_trust._real_intermediates_below(chain), [0, 1, 1])  # for S, X, root
+		self.assertIsNone(ca_trust._validate_path(chain, (chain[-1],), NOW))
+		chain, _ = self.sub_rollover(with_t=True)  # leaf, T, S1, sub (pathLen 0), CA (pathLen 1), root
+		self.assertEqual([ca_trust._self_issued(cert) for cert in chain], [False, False, True, False, False, True])
+		self.assertEqual(ca_trust._real_intermediates_below(chain), [0, 1, 1, 2, 3])
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust._validate_path(chain, (chain[-1],), NOW)
+		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+		chain, _ = self.sub_rollover()  # leaf, S1, sub (pathLen 0), CA (pathLen 1), root
+		self.assertEqual(ca_trust._real_intermediates_below(chain), [0, 0, 1, 2])
+		self.assertIsNone(ca_trust._validate_path(chain, (chain[-1],), NOW))
+
+	# -- negative controls
+
+	def test_self_issued_intermediate_signed_by_an_unrelated_key_is_refused(self):
+		chain, keys = self.rollover(x_signer_key=_test_pki.rsa_key())
+		self.assertFalse(ca_trust._directly_issued(chain[2], chain[3]))
+		net = self.assertChainRefused("CHAIN_INCOMPLETE", chain, keys)  # X's AIA serves the root, which did not sign X
+		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"], RO["root_cer"]])
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:  # the builder alone refuses the link
+			ca_trust._build_path(chain[0], (chain[-1],), ca_trust._Network(self.world(chain, keys), ca_trust.DEFAULT_ALLOWED_HOSTS))
+		self.assertEqual(cm.exception.reason_code, "CHAIN_INCOMPLETE")
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust._validate_path(chain, (chain[-1],), NOW)
+		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+
+	def test_self_signed_rogue_with_the_pinned_name_never_becomes_an_anchor(self):
+		rogue_key = _test_pki.rsa_key()
+		rogue = _test_pki.make_ca("unused", rogue_key, None, None, subject=self.c.root.subject, validity=_test_pki._VALIDITY["root"])
+		self.assertEqual(rogue.subject, self.c.root.subject)
+		self.assertTrue(ca_trust._directly_issued(rogue, rogue))
+		s = _test_pki.make_ca("Rogue Sub-CA", self.c.sub_key, rogue, rogue_key, pathlen=0, locations=(RO["x_cer"], RO["s_ocsp"], RO["s_crl"]))
+		leaf = _test_pki.make_signer_leaf(s.subject, self.c.sub_key, key=self.c.leaf_key, ca_issuers=RO["s_cer"], ocsp_url=RO["leaf_ocsp"])[0]
+		chain, keys = [leaf, s, rogue], [self.c.leaf_key, self.c.sub_key, rogue_key]
+		net = self.assertChainRefused("NOT_CCA_TRUSTED", chain, keys, roots=[self.c.root])
+		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"]])  # fetched, refused, no revocation query
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust._build_path(leaf, (self.c.root,), ca_trust._Network(self.world(chain, keys), ca_trust.DEFAULT_ALLOWED_HOSTS))
+		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust._validate_path(chain, (self.c.root,), NOW)
+		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+
+	def test_self_issued_leaf_is_still_refused(self):
+		leaf = _test_pki.make_signer_leaf(self.c.root.subject, self.new_key, key=self.c.leaf_key, subject=self.c.root.subject, ca_issuers=RO["x_cer"])[0]
+		self.assertEqual(leaf.subject, leaf.issuer)
+		net = FakeNet()
+		self.assertRefused("NOT_CCA_TRUSTED", leaf, net, roots=[self.c.root])
+		self.assertEqual(net.calls, [])
+
+	def test_self_issued_intermediate_must_be_a_ca_that_signs_certificates(self):
+		for label, kw in (("keyUsage without keyCertSign", dict(key_usage=("crl_sign",))), ("cA=false", dict(basic_constraints=(False, None)))):
+			with self.subTest(label):
+				ca_trust.clear_cache()
+				net = self.assertChainRefused("NOT_CCA_TRUSTED", *self.rollover(**kw))
+				self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"]])
+
+	def test_self_signed_certificate_is_never_an_intermediate_link(self):
+		# A re-issued copy of the pinned root (same name, same key, other DER) placed between the CA and the root:
+		# every signature in the chain verifies, yet a self-signed certificate is a root, not a link.
+		c = self.c
+		reissued = _test_pki.make_ca("unused", c.root_key, None, None, subject=c.root.subject, validity=_test_pki._VALIDITY["root"])
+		self.assertTrue(ca_trust._directly_issued(reissued, c.root) and ca_trust._directly_issued(c.ca, reissued))
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust._validate_path([c.leaf, c.sub, c.ca, reissued, c.root], (c.root,), NOW)
+		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
+		self.assertIsNone(ca_trust._validate_path([c.leaf, c.sub, c.ca, c.root], (c.root,), NOW))  # positive control
+
+	def stuffed(self, count):
+		"""(chain, keys, x_urls): root -> X1..Xcount (all self-issued, each signed by the previous key) -> S -> leaf."""
+		c = self.c
+		issuer, issuer_key, issuer_url = c.root, c.root_key, RO["root_cer"]
+		xs, keys, urls = [], [], []
+		for index in range(1, count + 1):
+			key, url = _ec_key(), f"https://signxca.com/test-pki/rollover/X{index}.cer"
+			locations = (issuer_url, f"http://ocvs.gov.in/test-pki/rollover/X{index}", f"http://cca.gov.in/test-pki/rollover/X{index}.crl")
+			xs.append(_test_pki.make_ca("unused", key, issuer, issuer_key, subject=c.root.subject, locations=locations))
+			keys.append(key)
+			urls.append(url)
+			issuer, issuer_key, issuer_url = xs[-1], key, url
+		s = _test_pki.make_ca("Stuffed Sub-CA", c.sub_key, issuer, issuer_key, pathlen=0, locations=(issuer_url, RO["s_ocsp"], RO["s_crl"]))
+		leaf = _test_pki.make_signer_leaf(s.subject, c.sub_key, key=c.leaf_key, ca_issuers=RO["s_cer"], ocsp_url=RO["leaf_ocsp"], crl_url=RO["leaf_crl"])[0]
+		return [leaf, s, *reversed(xs), c.root], [c.leaf_key, c.sub_key, *reversed(keys), c.root_key], urls
+
+	def test_rollover_stuffing_is_bounded_by_the_depth_cap(self):
+		with self.subTest("positive control: 3 self-issued + S = MAX_INTERMEDIATES intermediates passes end to end"):
+			chain, keys, _ = self.stuffed(ca_trust.MAX_INTERMEDIATES - 1)
+			self.assertChainPasses(chain, keys)
+		for count in (ca_trust.MAX_INTERMEDIATES, ca_trust.MAX_INTERMEDIATES + 1):
+			with self.subTest(f"{count} self-issued + S: over the cap even though pathLen ignores self-issued"):
+				ca_trust.clear_cache()
+				chain, keys, urls = self.stuffed(count)
+				net = self.world(chain, keys)
+				self.assertRefused("CHAIN_INCOMPLETE", chain[0], net, roots=[chain[-1]])
+				# exactly MAX_INTERMEDIATES downloads, then the walk stops (a hard bound on fetches too)
+				self.assertEqual(net.urls(), [RO["s_cer"], *list(reversed(urls))[: ca_trust.MAX_INTERMEDIATES - 1]])
+				with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+					ca_trust._validate_path(chain, (chain[-1],), NOW)
+				self.assertEqual(cm.exception.reason_code, "CHAIN_INCOMPLETE")
+
+	def test_two_self_issued_certificates_signing_each_other_stop(self):
+		c = self.c
+		key_a, key_b = _ec_key(), _ec_key()
+		url_a, url_b = "https://signxca.com/test-pki/rollover/A.cer", "https://signxca.com/test-pki/rollover/B.cer"
+		name = types.SimpleNamespace(subject=c.root.subject)
+		a = _test_pki.make_ca("unused", key_a, name, key_b, subject=c.root.subject, locations=(url_b, RO["x_ocsp"], RO["x_crl"]))
+		b = _test_pki.make_ca("unused", key_b, name, key_a, subject=c.root.subject, locations=(url_a, RO["x_ocsp"], RO["x_crl"]))
+		s = _test_pki.make_ca("Loop Sub-CA", c.sub_key, name, key_a, pathlen=0, locations=(url_a, RO["s_ocsp"], RO["s_crl"]))
+		leaf = _test_pki.make_signer_leaf(s.subject, c.sub_key, key=c.leaf_key, ca_issuers=RO["s_cer"])[0]
+		net = FakeNet()
+		net.routes.update({RO["s_cer"]: der(s), url_a: der(a), url_b: der(b)})
+		self.assertRefused("CHAIN_INCOMPLETE", leaf, net, roots=[c.root])
+		self.assertEqual(net.urls(), [RO["s_cer"], url_a, url_b, url_a])
+
+	def test_issuer_name_encoding_tricks_on_the_rollover_link(self):
+		# X claims the pinned name as issuer, re-encoded as PrintableString, and IS signed by the pinned key:
+		# x509.Name equality would match, the DER does not, so X is neither anchored nor self-issued.
+		c = self.c
+		retyped = x509.Name(
+			[x509.NameAttribute(a.oid, a.value, x509.name._ASN1Type.PrintableString) if a.oid != NameOID.COUNTRY_NAME else a for a in c.root.subject]
+		)
+		self.assertEqual(retyped, c.root.subject)
+		self.assertNotEqual(retyped.public_bytes(), c.root.subject.public_bytes())
+		x = _test_pki.make_ca(
+			"unused", self.new_key, types.SimpleNamespace(subject=retyped), c.root_key, subject=c.root.subject,
+			validity=_test_pki._VALIDITY["ca"], locations=(RO["root_cer"], RO["x_ocsp"], RO["x_crl"]),
+		)
+		self.assertFalse(ca_trust._self_issued(x))
+		chain, keys = self.rollover()
+		chain[2] = x
+		net = self.assertChainRefused("CHAIN_INCOMPLETE", chain, keys)
+		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"], RO["root_cer"]])
+		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
+			ca_trust._validate_path(chain, (c.root,), NOW)
+		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
 
 
 # ---------------------------------------------------------------- real CCA India chain (public certificates only)

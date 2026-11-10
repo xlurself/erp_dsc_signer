@@ -166,7 +166,7 @@ Python `x509.verification` API (needs cryptography >= 42; confirm bench env vers
       certificates a real CCA CA never issues);
     - every certificate valid at `now`, inclusive at both edges (`EXPIRED_OR_NOT_YET_VALID`);
     - every CA, the pinned root included: v3, basicConstraints cA=true, pathLenConstraint >= number of CAs below it
-      (self-issued ones counted too, stricter than RFC), keyCertSign when keyUsage is present (RFC 5280 s6.1.4(n)), strong
+      (self-issued ones counted too, stricter than RFC: **superseded by item 19**), keyCertSign when keyUsage is present (RFC 5280 s6.1.4(n)), strong
       key, no unhandled critical extension, no nameConstraints (not implemented: refused even when non-critical)
       (`NOT_CCA_TRUSTED`);
     - every link: issuer name DER-equal to the issuer's subject (RFC 5280 s4.1.2.4; x509.Name equality would ignore the
@@ -188,3 +188,37 @@ Python `x509.verification` API (needs cryptography >= 42; confirm bench env vers
     refused, not implemented; non-critical policyMappings is ignored (RFC 6.1.4(a) anyPolicy check not done; it cannot
     widen trust, which comes only from the pinned roots and the verified links); names that RFC 5280 s7.1 would match
     after normalisation but that are encoded differently are refused.
+19. **CA key rollover: self-issued intermediates (rev 3.1, 2026-11-10, panel round R2 iteration 4, release 54e6157).**
+    Found by the panel: a valid chain through a CA's key-rollover certificate (RFC 5280 s6.1 "self-issued": same subject
+    and issuer name, NEW key, signed by the OLD key) was refused as NOT_CCA_TRUSTED, because `_issuing_anchor` treated a
+    pinned-name match without the pinned key's signature as terminal, `_build_path` rejected every self-issued
+    certificate, and pathLen counted self-issued intermediates. Rule now (`ca_trust.py`):
+    - **Trust is only a pinned key's direct signature.** `_issuing_anchor` returns a pinned root only when that root's key
+      signed the certificate (names DER-equal); a name match alone decides nothing and the walk follows the AIA. The
+      anchor is always one of the pinned objects, and `_validate_path` still requires the last certificate to BE a
+      pinned DER.
+    - **Self-issued vs self-signed.** A self-issued certificate signed by another key (a rollover) is an ordinary
+      intermediate: it must be signed by the next certificate up and pass every CA check (cA, keyCertSign, extensions,
+      key, validity). A self-signed certificate (verifies with its own key) that no pinned key signed ends the walk as
+      NOT_CCA_TRUSTED and is never an anchor or a link; the validator also refuses a self-signed certificate in any
+      intermediate position. "Self-issued" compares the DER names, like every name in the path. A self-issued LEAF is
+      still refused (NOT_CCA_TRUSTED, before any download).
+    - **pathLenConstraint** counts only non-self-issued intermediates between the CA and the leaf (RFC 5280 s4.2.1.9,
+      the count s6.1.4(l)/(m) enforce; `_real_intermediates_below`). The pinned root's own pathLen is still applied
+      (stricter than RFC, which does not process the anchor's).
+    - **Hard bounds unchanged:** at most `MAX_INTERMEDIATES` (4) intermediates, self-issued ones included, in both the
+      builder (so at most 4 certificate downloads) and the validator; no certificate twice (a loop of two self-issued
+      certificates signing each other ends as CHAIN_INCOMPLETE).
+    - Contract change: a certificate issued under a pinned root's name but by another key used to stop at once; now its AIA
+      is followed (bounded as above) and the outcome is CHAIN_INCOMPLETE / CA_FETCH_FAILED, or NOT_CCA_TRUSTED when the
+      walk reaches a self-signed certificate (e.g. a rogue root copying the pinned name, which is now downloaded, refused
+      and never cached). Reason codes unchanged (8).
+    Tests: `test_ca_trust.KeyRolloverTest`: root-level and sub-CA-level rollover end to end (OCSP, and CRL only); pathLen
+    boundaries on both sides (root pathLen 1 accepted / 0 refused, one real intermediate too many refused, X pathLen 0/1,
+    sub-CA pathLen 0 with a self-issued certificate below accepted and with a real one refused); refusals for a self-issued
+    certificate signed by an unrelated key, a self-signed rogue with the pinned name, a self-issued leaf, a self-issued
+    CA without keyCertSign or with cA=false, a self-signed intermediate, rollover stuffing beyond the cap (exactly 4
+    downloads), a two-certificate loop, and an issuer name re-encoded as PrintableString. Mutation: 12 new mutants plus
+    the earlier 25, all killed. Live (2026-11-10): the organisation and personal SignX DSCs re-verified (real chain, direct
+    signature to the pinned root). Residual: an AIA candidate is chosen by signature; when one AIA address serves
+    several certificates (PKCS#7 bundles) none is used (unchanged: PKCS#7 AIA files are not supported).
