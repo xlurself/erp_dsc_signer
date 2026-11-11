@@ -136,9 +136,11 @@ future"). NOT yet tested on Windows: `--install-autostart --yes`, log off and on
 browser, Windows 10, 32-bit Python, an InnaIT token. The Mac signing with the InnaitKey organisation DSC on the same site
 produced a valid file; Adobe's refusal to open it is unexplained (exact message requested).
 Review fixes (2026-11-11, panel round 6): the LaunchAgent no longer writes stdout/stderr to files (/dev/null; the capped daemon
-log is the record, `--doctor` shows config problems); the crash log is rotated at start when over the size cap; on Windows
-`--add-module` accepts a driver only under Windows or Program Files (folders only administrators can write; full ACL
-reading would need more than the standard library, so this is a conservative location rule); `--install-autostart --yes` /
+log is the record, `--doctor` shows config problems); the crash log is rotated at start when over the size cap (only its last 1 MB is kept as .1); on Windows
+`--add-module` reads the real permissions (GetNamedSecurityInfoW + GetEffectiveRightsFromAclW through ctypes) and refuses a
+driver that Everyone, Authenticated Users or Users can write, or whose folder they can write, or whose parent folders they can
+rename or delete; a permission it cannot read is a refusal (unit-tested with injected rights; the real Windows API call is
+verified on a Windows machine, see section 10); `--install-autostart --yes` /
 `--uninstall-autostart --yes` refuse root (macOS) and an elevated prompt (Windows); `--find-drivers` reads a folder lazily
 within its bounds; adding an already known or configured driver is exit 0 before the strict file check.
 Remaining residuals: a failing auto-start can still restart every few seconds (only the capped log records it; Task Scheduler

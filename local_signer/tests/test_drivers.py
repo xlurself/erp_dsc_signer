@@ -537,15 +537,45 @@ class TestDriverFolderPermissions(unittest.TestCase):
 
 
 class TestPanelRound6(unittest.TestCase):
-	def test_windows_driver_must_be_in_a_folder_only_administrators_write(self):
-		env = {"SystemRoot": r"C:\Windows", "ProgramFiles": r"C:\Program Files", "ProgramFiles(x86)": r"C:\Program Files (x86)"}
-		for good in (r"C:\Windows\System32\SignatureP11.dll", r"c:\windows\system32\x.dll", r"C:\Program Files\eMudhra\p11.dll"):
-			with self.subTest(good=good):
-				drivers._check_windows_location(good, env)
-		for bad in (r"C:\Users\Public\p11.dll", r"D:\Windows\p11.dll", r"C:\Windows-evil\p11.dll", r"C:\Program Files-evil\p11.dll",
-			r"C:\Windows\..\Users\x\p11.dll", r"\\server\share\p11.dll"):
-			with self.subTest(bad=bad), self.assertRaises(drivers.Refused):
-				drivers._check_windows_location(bad, env)
+	def test_windows_acl_walk_checks_the_file_its_folder_and_every_folder_above(self):
+		seen = {}
+
+		def rights(path):
+			seen[path] = True
+			return table.get(path, 0)
+
+		driver = r"C:\Program Files\Vendor\bin\p11.dll"
+		table = {}
+		drivers._check_windows_acl(driver, rights)
+		self.assertEqual(
+			[driver, r"C:\Program Files\Vendor\bin", r"C:\Program Files\Vendor", r"C:\Program Files", "C:\\"],
+			list(seen),
+		)
+		for path, mask in (
+			(driver, 0x2),  # Users can write the file
+			(r"C:\Program Files\Vendor\bin", 0x4),  # ...or add files to its folder
+			(r"C:\Program Files\Vendor", 0x40),  # ...or delete children of a folder above
+			(r"C:\Program Files", 0x10000),  # ...or delete a folder above
+		):
+			with self.subTest(path=path):
+				table.clear()
+				table[path] = mask
+				with self.assertRaises(drivers.Refused):
+					drivers._check_windows_acl(driver, rights)
+
+	def test_windows_write_to_a_far_folder_is_not_a_replacement_risk_but_write_to_the_folder_is(self):
+		# C:\ lets Authenticated Users create folders (0x4): that cannot replace a file two levels down.
+		drivers._check_windows_acl(r"C:\Vendor\bin\p11.dll", lambda p: 0x4 if p == "C:\\" else 0)
+		with self.assertRaises(drivers.Refused):
+			drivers._check_windows_acl(r"C:\Windows\Temp\p11.dll", lambda p: 0x6 if p == r"C:\Windows\Temp" else 0)
+
+	def test_windows_unreadable_permissions_refuse(self):
+		def boom(path):
+			raise OSError(5, "denied")
+
+		with self.assertRaises(drivers.Refused) as ctx:
+			drivers._check_windows_acl(r"C:\Windows\System32\x.dll", boom)
+		self.assertIn("could not be checked", ctx.exception.message)
 
 	def test_a_known_path_is_success_even_when_the_strict_check_would_refuse(self):
 		root = Path(tempfile.mkdtemp(prefix="erp-dsc-known-"))

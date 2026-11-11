@@ -213,10 +213,22 @@ def log_handler_failure() -> None:
 
 
 def _rotate_if_large(path, max_bytes) -> None:
-	"""Keep one previous crash file (.1) and start a fresh one when the current file is over ``max_bytes``."""
+	"""When the crash file is over ``max_bytes``: keep only its last ``max_bytes`` as ``.1`` and start fresh.
+
+	Both generations stay within the cap (an oversized backup would defeat it).
+	"""
 	try:
-		if os.lstat(path).st_size > max_bytes:
-			os.replace(path, os.fspath(path) + ".1")
+		path = os.fspath(path)
+		if os.lstat(path).st_size <= max_bytes:
+			return
+		with open(path, "rb") as handle:
+			handle.seek(-max_bytes, os.SEEK_END) if max_bytes else None
+			tail = handle.read(max_bytes)
+		flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+		fd = os.open(path + ".1", flags, 0o600)
+		with os.fdopen(fd, "wb") as backup:
+			backup.write(tail)
+		os.unlink(path)
 	except OSError:
 		pass  # missing or unreadable: open_private decides what happens next
 

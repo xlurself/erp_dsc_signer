@@ -280,7 +280,7 @@ def check_module_path(value, *, system=None) -> str:
 	if not plausible_library_name(os.path.basename(value)):
 		raise Refused(f"{_printable(value)} is not a library file (.dylib, .so or .dll).")
 	if system == "Windows":
-		_check_windows_location(value)
+		_check_windows_acl(value)
 	else:
 		_check_not_replaceable(value, info)
 	if not os.access(value, os.R_OK):
@@ -288,27 +288,97 @@ def check_module_path(value, *, system=None) -> str:
 	return value
 
 
-def windows_protected_roots(env=None) -> tuple:
-	env = os.environ if env is None else env
-	names = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")
-	return tuple(ntpath.normcase(ntpath.normpath(env[name])) for name in names if env.get(name))
+# Well-known SIDs of groups that must NOT be able to change the driver: Everyone, Authenticated Users, Users.
+_UNTRUSTED_SIDS = ("S-1-1-0", "S-1-5-11", "S-1-5-32-545")
+# Access-mask bits: FILE_WRITE_DATA/ADD_FILE 0x2, FILE_APPEND_DATA/ADD_SUBDIRECTORY 0x4, FILE_WRITE_EA 0x10,
+# FILE_DELETE_CHILD 0x40, FILE_WRITE_ATTRIBUTES 0x100, DELETE 0x10000, WRITE_DAC 0x40000, WRITE_OWNER 0x80000.
+_WRITE_RIGHTS = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000
+# A folder further up only matters if it lets someone rename or delete the folder below it.
+_REPLACE_RIGHTS = 0x40 | 0x10000 | 0x40000 | 0x80000
 
 
-def _check_windows_location(value: str, env=None) -> None:
-	"""On Windows the driver must live where only administrators can write (Windows or Program Files).
+def windows_untrusted_rights(path: str) -> int:
+	"""The access rights Everyone, Authenticated Users and Users have on ``path`` (a bit mask).  Windows only.
 
-	The helper loads this DLL in the process that holds the PIN.  Reading ACLs reliably needs more than
-	the standard library, so the folders Windows itself protects are the rule; a driver anywhere else
-	(for example a user-writable folder or a shared drive) is refused.
+	Reads the real DACL with ``GetNamedSecurityInfoW`` and asks ``GetEffectiveRightsFromAclW`` per SID.
+	Raises ``OSError`` when it cannot read: the caller then refuses (fail closed).
 	"""
-	path = ntpath.normcase(ntpath.normpath(value))
-	for root in windows_protected_roots(env):
-		if path == root or path.startswith(root.rstrip("\\") + "\\"):
+	import ctypes
+	from ctypes import wintypes
+
+	class Trustee(ctypes.Structure):
+		_fields_ = [
+			("pMultipleTrustee", ctypes.c_void_p),
+			("MultipleTrusteeOperation", ctypes.c_int),
+			("TrusteeForm", ctypes.c_int),
+			("TrusteeType", ctypes.c_int),
+			("ptstrName", ctypes.c_void_p),
+		]
+
+	advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+	kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+	kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+	kernel32.LocalFree.restype = ctypes.c_void_p
+	advapi32.GetNamedSecurityInfoW.argtypes = [
+		wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p,
+		ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+	]
+	advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+	advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+	advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+	advapi32.BuildTrusteeWithSidW.argtypes = [ctypes.POINTER(Trustee), ctypes.c_void_p]
+	advapi32.BuildTrusteeWithSidW.restype = None
+	advapi32.GetEffectiveRightsFromAclW.argtypes = [ctypes.c_void_p, ctypes.POINTER(Trustee), ctypes.POINTER(wintypes.DWORD)]
+	advapi32.GetEffectiveRightsFromAclW.restype = wintypes.DWORD
+
+	dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+	# SE_FILE_OBJECT = 1, DACL_SECURITY_INFORMATION = 4
+	status = advapi32.GetNamedSecurityInfoW(path, 1, 4, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+	if status:
+		raise OSError(status, "the permissions of this file could not be read")
+	try:
+		combined = 0
+		for text in _UNTRUSTED_SIDS:
+			sid = ctypes.c_void_p()
+			if not advapi32.ConvertStringSidToSidW(text, ctypes.byref(sid)):
+				raise ctypes.WinError(ctypes.get_last_error())
+			try:
+				trustee = Trustee()
+				advapi32.BuildTrusteeWithSidW(ctypes.byref(trustee), sid)
+				mask = wintypes.DWORD()
+				status = advapi32.GetEffectiveRightsFromAclW(dacl, ctypes.byref(trustee), ctypes.byref(mask))
+				if status:
+					raise OSError(status, "the permissions of this file could not be read")
+				combined |= mask.value
+			finally:
+				kernel32.LocalFree(sid)
+		return combined
+	finally:
+		kernel32.LocalFree(descriptor)
+
+
+def _check_windows_acl(value: str, rights=None) -> None:
+	"""Refuse a driver that Everyone / Authenticated Users / Users can change, or whose folder they can change.
+
+	The helper loads this DLL in the process that holds the PIN.  The file and its own folder must deny
+	write to those groups; every folder above must deny rename and delete.  Any failure to read a
+	permission is a refusal.
+	"""
+	rights = rights or windows_untrusted_rights
+	path = ntpath.normpath(value)
+	level = 0
+	while True:
+		needed = _WRITE_RIGHTS if level < 2 else _REPLACE_RIGHTS
+		try:
+			granted = rights(path)
+		except Exception:
+			raise Refused("the permissions of this driver or its folder could not be checked; it was not added.") from None
+		if granted & needed:
+			raise Refused("other users can change this file or its folder; ask your administrator to fix its permissions.")
+		parent = ntpath.dirname(path)
+		if not parent or parent == path:
 			return
-	raise Refused(
-		"this driver is not in a folder only administrators can change (Windows or Program Files); "
-		"ask your administrator to install the driver there."
-	)
+		path, level = parent, level + 1
 
 
 def _check_not_replaceable(value: str, info) -> None:

@@ -407,5 +407,7 @@ class TestCrashLogCap(unittest.TestCase):
 		crash.write_bytes(b"x" * 5000)
 		log = logs.DaemonLog(config, max_bytes=1000, heartbeat_seconds=None).start()
 		self.addCleanup(log.close)
-		self.assertTrue(Path(str(crash) + ".1").exists())
+		backup = Path(str(crash) + ".1")
+		self.assertTrue(backup.exists())
+		self.assertLessEqual(backup.stat().st_size, 1000)  # the retained generation is within the cap too
 		self.assertLess(crash.stat().st_size, 1000)
