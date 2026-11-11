@@ -3,6 +3,7 @@
 
 frappe.ui.form.on("DSC Signing Settings", {
 	onload(frm) {
+		frm.set_query("default_print_format", () => ({ filters: { doc_type: "Sales Invoice", disabled: 0 } }));
 		frm.trigger("set_validation_indicator");
 	},
 

@@ -193,10 +193,12 @@
    "label": "Print"
   },
   {
+   "description": "The Sales Invoice template the signed PDF is made from. Required: settings cannot be saved without it.",
    "fieldname": "default_print_format",
    "fieldtype": "Link",
-   "label": "Default Print Format",
-   "options": "Print Format"
+   "label": "Sales Invoice Template (Print Format)",
+   "options": "Print Format",
+   "reqd": 1
   },
   {
    "description": "Optional letter head passed to PDF generation.",
@@ -211,8 +213,8 @@
    "label": "Trust & Timestamp"
   },
   {
-   "default": "1",
-   "description": "Embed an RFC 3161 timestamp token from a trusted TSA.",
+   "default": "0",
+   "description": "Embed an RFC 3161 timestamp token from a trusted TSA. The signer on the user's computer must be able to reach the timestamp server; leave this off until that works.",
    "fieldname": "enable_timestamp",
    "fieldtype": "Check",
    "label": "Embed Trusted Timestamp (TSA)"

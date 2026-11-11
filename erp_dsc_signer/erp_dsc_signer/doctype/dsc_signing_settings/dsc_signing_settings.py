@@ -14,8 +14,23 @@ ALLOWED_SIGNING_METHODS = {"pfx", "usb"}
 LOCAL_SIGNER_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
+def check_invoice_print_format(print_format) -> None:
+	"""The invoice template the signed PDF is made from: chosen, existing, enabled, for Sales Invoice."""
+	name = (print_format or "").strip() if isinstance(print_format, str) else ""
+	if not name:
+		frappe.throw(_("Select the Sales Invoice template (Print Format) before saving."))
+	row = frappe.db.get_value("Print Format", name, ["doc_type", "disabled"], as_dict=True)
+	if not row:
+		frappe.throw(_("The selected Print Format does not exist."))
+	if row.doc_type != "Sales Invoice":
+		frappe.throw(_("The selected Print Format is not a Sales Invoice template."))
+	if frappe.utils.cint(row.disabled):
+		frappe.throw(_("The selected Print Format is disabled. Choose an enabled Sales Invoice template."))
+
+
 class DSCSigningSettings(Document):
 	def validate(self):
+		check_invoice_print_format(self.default_print_format)
 		self._validate_pfx()
 
 		if not frappe.utils.cint(self.enabled):
