@@ -113,8 +113,10 @@ def build_launch_agent(arguments, log_folder) -> bytes:
 			"ProcessType": "Interactive",  # it shows the PIN and pairing dialogs
 			"LimitLoadToSessionType": "Aqua",  # a desktop login only, never an SSH session
 			"Umask": 0o077,  # every file the signer creates is user-only
-			"StandardOutPath": posixpath.join(log_folder, STDOUT_NAME),
-			"StandardErrorPath": posixpath.join(log_folder, STDERR_NAME),
+			# Never an uncapped file: under KeepAlive a failing start repeats every few seconds. The
+			# size-capped, rotating daemon log (logs.py) is the record; --doctor shows config problems.
+			"StandardOutPath": "/dev/null",
+			"StandardErrorPath": "/dev/null",
 		},
 		fmt=plistlib.FMT_XML,
 		sort_keys=True,
@@ -226,8 +228,6 @@ def _mac_install_steps(arguments, config: Path, home, uid) -> list:
 	return [
 		Step("mkdir", str(plist.parent)),
 		Step("private_dir", str(logs)),
-		Step("touch", str(logs / STDOUT_NAME)),
-		Step("touch", str(logs / STDERR_NAME)),
 		Step("write", str(plist), content=build_launch_agent(arguments, logs)),
 		Step("run_optional", argv=(LAUNCHCTL, "bootout", f"gui/{uid}/{LABEL}")),
 		Step("run", argv=(LAUNCHCTL, "bootstrap", f"gui/{uid}", str(plist))),
@@ -414,13 +414,34 @@ def _running_as_root(uid) -> bool:
 	return (os.getuid() if uid is None else uid) == 0
 
 
-def install(config_path, *, yes=False, system=None, runner=None, home=None, uid=None, executable=None, frozen=None, user_id=None, path_exists=None) -> int:
+def windows_is_elevated() -> bool:
+	try:
+		import ctypes
+
+		return bool(ctypes.windll.shell32.IsUserAnAdmin())
+	except (AttributeError, OSError):
+		return False  # not Windows, or cannot tell: the task is still created for the current user
+
+
+def _refuse_elevated(system, yes, uid, elevated) -> str | None:
+	"""A login item belongs to the person who signs: refuse --yes as root (macOS) or from an elevated Windows prompt."""
+	if not yes:
+		return None
+	if system == "Darwin" and _running_as_root(uid):
+		return "error: run this as your normal user, not with sudo or as root: the login item belongs to the user who signs."
+	if system == "Windows" and (windows_is_elevated() if elevated is None else elevated):
+		return "error: run this from a normal (not 'Run as administrator') window: the login item belongs to the user who signs."
+	return None
+
+
+def install(config_path, *, elevated=None, yes=False, system=None, runner=None, home=None, uid=None, executable=None, frozen=None, user_id=None, path_exists=None) -> int:
 	system = system or platform.system()
 	if system not in ("Darwin", "Windows"):
 		print(f"Starting the signer at login is not supported on {system} by this tool.", file=sys.stderr)
 		return 1
-	if yes and system == "Darwin" and _running_as_root(uid):
-		print("error: run this as your normal user, not with sudo or as root: the login item belongs to the user who signs.", file=sys.stderr)
+	refusal = _refuse_elevated(system, yes, uid, elevated)
+	if refusal:
+		print(refusal, file=sys.stderr)
 		return 2
 	try:
 		config, arguments = _prepare(config_path, system, executable, frozen, path_exists)
@@ -442,13 +463,14 @@ def install(config_path, *, yes=False, system=None, runner=None, home=None, uid=
 	)
 
 
-def uninstall(config_path=None, *, yes=False, system=None, runner=None, home=None, uid=None, **_ignored) -> int:
+def uninstall(config_path=None, *, elevated=None, yes=False, system=None, runner=None, home=None, uid=None, **_ignored) -> int:
 	system = system or platform.system()
 	if system not in ("Darwin", "Windows"):
 		print(f"Starting the signer at login is not supported on {system} by this tool.", file=sys.stderr)
 		return 1
-	if yes and system == "Darwin" and _running_as_root(uid):
-		print("error: run this as your normal user, not with sudo or as root.", file=sys.stderr)
+	refusal = _refuse_elevated(system, yes, uid, elevated)
+	if refusal:
+		print(refusal, file=sys.stderr)
 		return 2
 	try:
 		if system == "Darwin":

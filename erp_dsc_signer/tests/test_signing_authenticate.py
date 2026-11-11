@@ -1259,8 +1259,8 @@ class TestSalesInvoiceJsContract(unittest.TestCase):
 
 
 _OFFLINE_TEXT = (
-	"The ERP DSC Signer program is not running on this computer. Open ERP DSC Signer from your menu bar or Start menu, "
-	"or restart your computer, then try Sign again. If it is not installed yet, ask your administrator to install it."
+	"The ERP DSC Signer program is not running on this computer. Start it the way your administrator set it up, "
+	'then try Sign again. If it does not start, ask your administrator to run erp-dsc-local --doctor on this computer.'
 )
 _DECLINED_TEXT = (
 	"This computer did not allow this site to use your signing token. "

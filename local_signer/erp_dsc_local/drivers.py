@@ -128,7 +128,12 @@ def find_drivers(roots, *, max_entries=MAX_ENTRIES, max_seconds=MAX_SECONDS, max
 			folder, depth = queue.popleft()
 			try:
 				with os.scandir(folder) as listing:
-					entries = sorted(listing, key=lambda entry: entry.name)
+					entries = []
+					for entry in listing:  # lazily: never read more than the remaining budget
+						entries.append(entry)
+						if len(entries) > max_entries - visited or (len(entries) % 256 == 0 and clock() > deadline):
+							break
+					entries.sort(key=lambda entry: entry.name)
 			except OSError:
 				continue  # unreadable or vanished: skip it
 			for entry in entries:
@@ -274,11 +279,36 @@ def check_module_path(value, *, system=None) -> str:
 		raise Refused(f"{_printable(value)} is not a regular file.")
 	if not plausible_library_name(os.path.basename(value)):
 		raise Refused(f"{_printable(value)} is not a library file (.dylib, .so or .dll).")
-	if os.name != "nt":
+	if system == "Windows":
+		_check_windows_location(value)
+	else:
 		_check_not_replaceable(value, info)
 	if not os.access(value, os.R_OK):
 		raise Refused(f"{_printable(value)} cannot be read.")
 	return value
+
+
+def windows_protected_roots(env=None) -> tuple:
+	env = os.environ if env is None else env
+	names = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")
+	return tuple(ntpath.normcase(ntpath.normpath(env[name])) for name in names if env.get(name))
+
+
+def _check_windows_location(value: str, env=None) -> None:
+	"""On Windows the driver must live where only administrators can write (Windows or Program Files).
+
+	The helper loads this DLL in the process that holds the PIN.  Reading ACLs reliably needs more than
+	the standard library, so the folders Windows itself protects are the rule; a driver anywhere else
+	(for example a user-writable folder or a shared drive) is refused.
+	"""
+	path = ntpath.normcase(ntpath.normpath(value))
+	for root in windows_protected_roots(env):
+		if path == root or path.startswith(root.rstrip("\\") + "\\"):
+			return
+	raise Refused(
+		"this driver is not in a folder only administrators can change (Windows or Program Files); "
+		"ask your administrator to install the driver there."
+	)
 
 
 def _check_not_replaceable(value: str, info) -> None:
@@ -400,6 +430,11 @@ def add_module(config_path, module_path, *, verify=False, probe=None, system=Non
 	config = Path(os.path.abspath(os.path.expanduser(os.fspath(config_path))))
 	try:
 		original, raw = _read_config(config)
+		if isinstance(module_path, str) and module_path:
+			early = _duplicate(module_path, raw, system)  # already configured or built in: nothing to write, so no strict check
+			if early and early.startswith(_ALREADY_PREFIXES):
+				print(f"{_printable(module_path)} was not added: {early}")
+				return 0
 		path = check_module_path(module_path, system=system)
 		duplicate = _duplicate(path, raw, system)
 		if duplicate:

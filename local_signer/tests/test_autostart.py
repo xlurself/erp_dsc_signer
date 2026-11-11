@@ -88,8 +88,8 @@ class TestLaunchAgent(unittest.TestCase):
 				"ProcessType": "Interactive",
 				"LimitLoadToSessionType": "Aqua",
 				"Umask": 0o077,
-				"StandardOutPath": log_dir + "/launchd-stdout.log",
-				"StandardErrorPath": log_dir + "/launchd-stderr.log",
+				"StandardOutPath": "/dev/null",
+				"StandardErrorPath": "/dev/null",
 			},
 			plistlib.loads(data),
 		)
@@ -192,12 +192,12 @@ class TestMacInstall(AutostartCase):
 		)
 		data = plistlib.loads(self.plist.read_bytes())
 		self.assertEqual([MAC_APP, "--config", str(self.config)], data["ProgramArguments"])
-		self.assertEqual(str(self.state / "logs" / "launchd-stderr.log"), data["StandardErrorPath"])
+		self.assertEqual("/dev/null", data["StandardErrorPath"])  # never an uncapped file under KeepAlive
 		if POSIX:
 			self.assertEqual(0o600, stat.S_IMODE(os.stat(self.plist).st_mode))
 			self.assertEqual(0o700, stat.S_IMODE(os.stat(self.state / "logs").st_mode))
-			for name in ("launchd-stdout.log", "launchd-stderr.log"):
-				self.assertEqual(0o600, stat.S_IMODE(os.stat(self.state / "logs" / name).st_mode))
+			for name in ("launchd-stdout.log", "launchd-stderr.log"):  # panel round 6: no uncapped sidecar files
+				self.assertFalse((self.state / "logs" / name).exists())
 
 	def test_installing_twice_is_the_same_state(self):
 		self.run_cmd(autostart.install, yes=True)
@@ -345,3 +345,22 @@ class TestOtherSystemsAndDefaults(AutostartCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestElevatedRefusal(unittest.TestCase):
+	"""Panel round 6: the login item belongs to the user who signs, on both systems."""
+
+	def test_windows_elevated_is_refused_for_install_and_uninstall(self):
+		for command in (autostart.install, autostart.uninstall):
+			ran = []
+			err = io.StringIO()
+			with self.subTest(command=command.__name__), contextlib.redirect_stderr(err):
+				code = command("config.json", yes=True, system="Windows", elevated=True, runner=lambda *a, **k: ran.append(a))
+			self.assertEqual(2, code)
+			self.assertEqual([], ran)
+			self.assertIn("not 'Run as administrator'", err.getvalue())
+
+	def test_a_dry_run_is_never_refused_for_elevation(self):
+		self.assertNotEqual(2, autostart._refuse_elevated("Windows", False, None, True) and 2)
+		self.assertIsNone(autostart._refuse_elevated("Windows", False, None, True))
+		self.assertIsNone(autostart._refuse_elevated("Windows", True, None, False))

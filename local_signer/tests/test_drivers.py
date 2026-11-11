@@ -534,3 +534,64 @@ class TestDriverFolderPermissions(unittest.TestCase):
 		with mock.patch.object(os, "lstat", side_effect=fake), self.assertRaises(drivers.Refused) as ctx:
 			self.check()
 		self.assertIn("owned by another user", ctx.exception.message)
+
+
+class TestPanelRound6(unittest.TestCase):
+	def test_windows_driver_must_be_in_a_folder_only_administrators_write(self):
+		env = {"SystemRoot": r"C:\Windows", "ProgramFiles": r"C:\Program Files", "ProgramFiles(x86)": r"C:\Program Files (x86)"}
+		for good in (r"C:\Windows\System32\SignatureP11.dll", r"c:\windows\system32\x.dll", r"C:\Program Files\eMudhra\p11.dll"):
+			with self.subTest(good=good):
+				drivers._check_windows_location(good, env)
+		for bad in (r"C:\Users\Public\p11.dll", r"D:\Windows\p11.dll", r"C:\Windows-evil\p11.dll", r"C:\Program Files-evil\p11.dll",
+			r"C:\Windows\..\Users\x\p11.dll", r"\\server\share\p11.dll"):
+			with self.subTest(bad=bad), self.assertRaises(drivers.Refused):
+				drivers._check_windows_location(bad, env)
+
+	def test_a_known_path_is_success_even_when_the_strict_check_would_refuse(self):
+		root = Path(tempfile.mkdtemp(prefix="erp-dsc-known-"))
+		self.addCleanup(shutil.rmtree, root, True)
+		library = root / "libTestVendorPKCS11.dylib"
+		library.write_bytes(b"x")
+		os.chmod(library, 0o775)  # group-writable: the strict check refuses a NEW module here
+		config = root / "config.json"
+		config.write_text("{}", encoding="utf-8")
+		out, err = io.StringIO(), io.StringIO()
+		with mock.patch.dict(KNOWN_PATHS, {"Darwin": {"generic_pkcs11": (str(library),)}}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+			code = drivers.add_module(config, str(library), system="Darwin")
+		self.assertEqual(0, code, err.getvalue())
+		self.assertIn("already known", out.getvalue())
+		self.assertEqual("{}", config.read_text(encoding="utf-8"))
+		with contextlib.redirect_stderr(io.StringIO()):
+			self.assertEqual(2, drivers.add_module(config, str(library), system="Darwin"))  # a new module is still refused
+
+	def test_the_scan_stops_reading_a_huge_folder_at_the_bound(self):
+		pulled = []
+
+		class Entry:
+			def __init__(self, n):
+				self.name = f"f{n}.txt"
+
+			def is_dir(self, **_):
+				return False
+
+			def is_file(self, **_):
+				return False
+
+			path = "x"
+
+		def endless():
+			for n in range(5000):
+				pulled.append(n)
+				yield Entry(n)
+
+		class Listing:
+			def __enter__(self):
+				return endless()
+
+			def __exit__(self, *_):
+				return False
+
+		with mock.patch.object(os, "scandir", return_value=Listing()), mock.patch.object(os.path, "isdir", return_value=True):
+			result = drivers.find_drivers([("/x", 1)], max_entries=10)
+		self.assertTrue(result.truncated)
+		self.assertLessEqual(len(pulled), 12)

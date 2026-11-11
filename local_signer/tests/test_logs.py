@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -393,3 +394,18 @@ class TestSweepWithLogFile(LeakSweepCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestCrashLogCap(unittest.TestCase):
+	def test_an_oversized_crash_file_is_rotated_at_start(self):
+		root = Path(tempfile.mkdtemp(prefix="erp-dsc-crash-"))
+		self.addCleanup(shutil.rmtree, root, True)
+		config = root / "config.json"
+		config.write_text("{}", encoding="utf-8")
+		logs.ensure_private_dir(logs.log_dir(config))
+		crash = logs.crash_path(config)
+		crash.write_bytes(b"x" * 5000)
+		log = logs.DaemonLog(config, max_bytes=1000, heartbeat_seconds=None).start()
+		self.addCleanup(log.close)
+		self.assertTrue(Path(str(crash) + ".1").exists())
+		self.assertLess(crash.stat().st_size, 1000)

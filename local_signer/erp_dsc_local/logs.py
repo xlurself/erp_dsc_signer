@@ -212,6 +212,15 @@ def log_handler_failure() -> None:
 # --- the daemon's log -----------------------------------------------------------------------
 
 
+def _rotate_if_large(path, max_bytes) -> None:
+	"""Keep one previous crash file (.1) and start a fresh one when the current file is over ``max_bytes``."""
+	try:
+		if os.lstat(path).st_size > max_bytes:
+			os.replace(path, os.fspath(path) + ".1")
+	except OSError:
+		pass  # missing or unreadable: open_private decides what happens next
+
+
 class DaemonLog:
 	"""Open with ``start()``, always ``close()``: the handler, the logger level, the thread
 	exception hook and faulthandler are restored, and the heartbeat thread stopped."""
@@ -232,6 +241,7 @@ class DaemonLog:
 		handler = PrivateRotatingFileHandler(
 			log_path(self.config_path), maxBytes=self.max_bytes, backupCount=self.backup_count, encoding="utf-8"
 		)
+		_rotate_if_large(crash_path(self.config_path), self.max_bytes)  # faulthandler appends: cap it like the main log
 		try:
 			crash = open_private(crash_path(self.config_path), binary=True)
 		except BaseException:

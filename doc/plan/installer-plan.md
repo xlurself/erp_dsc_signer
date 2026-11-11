@@ -135,6 +135,13 @@ timestamp server (now off by default), and the signing time was the site clock l
 future"). NOT yet tested on Windows: `--install-autostart --yes`, log off and on, the PIN window focus, pairing from a second
 browser, Windows 10, 32-bit Python, an InnaIT token. The Mac signing with the InnaitKey organisation DSC on the same site
 produced a valid file; Adobe's refusal to open it is unexplained (exact message requested).
-Known residuals from the 2026-11-11 independent review: a failing auto-start can restart forever and its stderr file
-(launchd-stderr.log) is not size-capped; signing/probe failure lines go to stderr only (lost under pythonw on Windows);
-the crash log is not capped; the daemon itself does not skip 32-bit drivers (the doctor and `--find-drivers` do).
+Review fixes (2026-11-11, panel round 6): the LaunchAgent no longer writes stdout/stderr to files (/dev/null; the capped daemon
+log is the record, `--doctor` shows config problems); the crash log is rotated at start when over the size cap; on Windows
+`--add-module` accepts a driver only under Windows or Program Files (folders only administrators can write; full ACL
+reading would need more than the standard library, so this is a conservative location rule); `--install-autostart --yes` /
+`--uninstall-autostart --yes` refuse root (macOS) and an elevated prompt (Windows); `--find-drivers` reads a folder lazily
+within its bounds; adding an already known or configured driver is exit 0 before the strict file check.
+Remaining residuals: a failing auto-start can still restart every few seconds (only the capped log records it; Task Scheduler
+restart behaviour on Windows is untested); signing/probe failure lines go to stderr only (lost under pythonw on Windows);
+the daemon itself does not skip 32-bit drivers (the doctor and `--find-drivers` do); log/config files on Windows rely on the
+user-profile default permissions (no explicit ACL code).
