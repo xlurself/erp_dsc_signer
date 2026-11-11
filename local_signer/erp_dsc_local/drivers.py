@@ -280,12 +280,45 @@ def check_module_path(value, *, system=None) -> str:
 	if not plausible_library_name(os.path.basename(value)):
 		raise Refused(f"{_printable(value)} is not a library file (.dylib, .so or .dll).")
 	if system == "Windows":
+		_check_windows_location(value)
+		_check_windows_real_path(value)
 		_check_windows_acl(value)
 	else:
 		_check_not_replaceable(value, info)
 	if not os.access(value, os.R_OK):
 		raise Refused(f"{_printable(value)} cannot be read.")
 	return value
+
+
+def windows_protected_roots(env=None) -> tuple:
+	env = os.environ if env is None else env
+	names = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")
+	return tuple(ntpath.normcase(ntpath.normpath(env[name])) for name in names if env.get(name))
+
+
+def _check_windows_location(value: str, env=None) -> None:
+	"""First gate: the driver lives under Windows or Program Files (never a network share, never elsewhere).
+
+	An allowlist of where Windows itself keeps administrator-only files; the ACL check below is the second
+	gate, because some folders under SystemRoot (Temp, Tasks, ...) are writable by ordinary users.
+	"""
+	path = ntpath.normcase(ntpath.normpath(value))
+	if path.startswith("\\\\"):
+		raise Refused("a driver on a network location is not accepted; install it on this computer under Program Files.")
+	for root in windows_protected_roots(env):
+		if path == root or path.startswith(root.rstrip("\\") + "\\"):
+			return
+	raise Refused(
+		"this driver is not in a folder only administrators can change (Windows or Program Files); "
+		"ask your administrator to install the driver there."
+	)
+
+
+def _check_windows_real_path(value: str, resolve=None) -> None:
+	"""A link or junction anywhere in the path would let the real file live somewhere else: refuse it."""
+	resolve = resolve or os.path.realpath
+	if ntpath.normcase(ntpath.normpath(resolve(value))) != ntpath.normcase(ntpath.normpath(value)):
+		raise Refused("the path goes through a link or junction; give the real path of the driver file.")
 
 
 # Well-known SIDs of groups that must NOT be able to change the driver: Everyone, Authenticated Users, Users.

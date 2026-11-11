@@ -537,6 +537,21 @@ class TestDriverFolderPermissions(unittest.TestCase):
 
 
 class TestPanelRound6(unittest.TestCase):
+	def test_windows_driver_must_be_under_windows_or_program_files_and_not_a_network_path(self):
+		env = {"SystemRoot": r"C:\Windows", "ProgramFiles": r"C:\Program Files", "ProgramFiles(x86)": r"C:\Program Files (x86)"}
+		for good in (r"C:\Windows\System32\SignatureP11.dll", r"c:\windows\system32\x.dll", r"C:\Program Files\eMudhra\p11.dll"):
+			with self.subTest(good=good):
+				drivers._check_windows_location(good, env)
+		for bad in (r"C:\Users\Public\p11.dll", r"D:\Windows\p11.dll", r"C:\Windows-evil\p11.dll", r"C:\Program Files-evil\p11.dll",
+			r"C:\Windows\..\Users\x\p11.dll", r"\\server\share\p11.dll", r"\\?\UNC\server\share\p11.dll"):
+			with self.subTest(bad=bad), self.assertRaises(drivers.Refused):
+				drivers._check_windows_location(bad, env)
+
+	def test_windows_path_through_a_link_or_junction_is_refused(self):
+		drivers._check_windows_real_path(r"C:\Windows\System32\x.dll", resolve=lambda p: p)
+		with self.assertRaises(drivers.Refused):
+			drivers._check_windows_real_path(r"C:\Program Files\Vendor\x.dll", resolve=lambda p: r"C:\Users\Public\x.dll")
+
 	def test_windows_acl_walk_checks_the_file_its_folder_and_every_folder_above(self):
 		seen = {}
 
