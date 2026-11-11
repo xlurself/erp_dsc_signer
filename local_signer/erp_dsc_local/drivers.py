@@ -321,32 +321,38 @@ def _check_windows_real_path(value: str, resolve=None) -> None:
 		raise Refused("the path goes through a link or junction; give the real path of the driver file.")
 
 
-# Well-known SIDs of groups that must NOT be able to change the driver: Everyone, Authenticated Users, Users.
-_UNTRUSTED_SIDS = ("S-1-1-0", "S-1-5-11", "S-1-5-32-545")
+# Who may hold write access to a driver: SYSTEM, Administrators, TrustedInstaller, CREATOR OWNER.  Anyone else
+# (Everyone, Users, a particular account, a domain group) with write access is refused: an allowlist, so a
+# principal we did not think of cannot slip through.
+_TRUSTED_SIDS = frozenset(
+	{
+		"S-1-5-18",
+		"S-1-5-32-544",
+		"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+		"S-1-3-0",
+	}
+)
 # Access-mask bits: FILE_WRITE_DATA/ADD_FILE 0x2, FILE_APPEND_DATA/ADD_SUBDIRECTORY 0x4, FILE_WRITE_EA 0x10,
-# FILE_DELETE_CHILD 0x40, FILE_WRITE_ATTRIBUTES 0x100, DELETE 0x10000, WRITE_DAC 0x40000, WRITE_OWNER 0x80000.
-_WRITE_RIGHTS = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000
+# FILE_DELETE_CHILD 0x40, FILE_WRITE_ATTRIBUTES 0x100, DELETE 0x10000, WRITE_DAC 0x40000, WRITE_OWNER 0x80000,
+# and the generic GENERIC_ALL 0x10000000 / GENERIC_WRITE 0x40000000.
+_GENERIC_WRITE = 0x10000000 | 0x40000000
+_WRITE_RIGHTS = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000 | _GENERIC_WRITE
 # A folder further up only matters if it lets someone rename or delete the folder below it.
-_REPLACE_RIGHTS = 0x40 | 0x10000 | 0x40000 | 0x80000
+_REPLACE_RIGHTS = 0x40 | 0x10000 | 0x40000 | 0x80000 | _GENERIC_WRITE
 
 
-def windows_untrusted_rights(path: str) -> int:
-	"""The access rights Everyone, Authenticated Users and Users have on ``path`` (a bit mask).  Windows only.
+def windows_allow_aces(path: str) -> list:
+	"""Every ACCESS-ALLOWED entry in ``path``'s DACL as ``(sid_text, access_mask)``.  Windows only.
 
-	Reads the real DACL with ``GetNamedSecurityInfoW`` and asks ``GetEffectiveRightsFromAclW`` per SID.
-	Raises ``OSError`` when it cannot read: the caller then refuses (fail closed).
+	Entries that only apply to children (inherit-only) and deny entries are skipped; a missing DACL means
+	everyone may do everything.  An entry type this function does not understand raises ``OSError``
+	and the caller refuses (fail closed).
 	"""
 	import ctypes
 	from ctypes import wintypes
 
-	class Trustee(ctypes.Structure):
-		_fields_ = [
-			("pMultipleTrustee", ctypes.c_void_p),
-			("MultipleTrusteeOperation", ctypes.c_int),
-			("TrusteeForm", ctypes.c_int),
-			("TrusteeType", ctypes.c_int),
-			("ptstrName", ctypes.c_void_p),
-		]
+	class AclSizeInformation(ctypes.Structure):
+		_fields_ = [("AceCount", wintypes.DWORD), ("AclBytesInUse", wintypes.DWORD), ("AclBytesFree", wintypes.DWORD)]
 
 	advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 	kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -357,12 +363,12 @@ def windows_untrusted_rights(path: str) -> int:
 		ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
 	]
 	advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
-	advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
-	advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
-	advapi32.BuildTrusteeWithSidW.argtypes = [ctypes.POINTER(Trustee), ctypes.c_void_p]
-	advapi32.BuildTrusteeWithSidW.restype = None
-	advapi32.GetEffectiveRightsFromAclW.argtypes = [ctypes.c_void_p, ctypes.POINTER(Trustee), ctypes.POINTER(wintypes.DWORD)]
-	advapi32.GetEffectiveRightsFromAclW.restype = wintypes.DWORD
+	advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
+	advapi32.GetAclInformation.restype = wintypes.BOOL
+	advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+	advapi32.GetAce.restype = wintypes.BOOL
+	advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+	advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
 
 	dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
 	# SE_FILE_OBJECT = 1, DACL_SECURITY_INFORMATION = 4
@@ -370,44 +376,62 @@ def windows_untrusted_rights(path: str) -> int:
 	if status:
 		raise OSError(status, "the permissions of this file could not be read")
 	try:
-		combined = 0
-		for text in _UNTRUSTED_SIDS:
-			sid = ctypes.c_void_p()
-			if not advapi32.ConvertStringSidToSidW(text, ctypes.byref(sid)):
+		if not dacl.value:
+			return [("S-1-1-0", 0xFFFFFFFF)]  # no DACL: everyone has full access
+		info = AclSizeInformation()
+		if not advapi32.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):  # AclSizeInformation
+			raise ctypes.WinError(ctypes.get_last_error())
+		entries = []
+		for index in range(info.AceCount):
+			ace = ctypes.c_void_p()
+			if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):
+				raise ctypes.WinError(ctypes.get_last_error())
+			header = ctypes.string_at(ace.value, 4)
+			kind, flags, size = header[0], header[1], int.from_bytes(header[2:4], "little")
+			if kind in (1, 6, 10, 12):  # deny entries only remove rights
+				continue
+			if flags & 0x08:  # INHERIT_ONLY_ACE: it applies to children, not to this object
+				continue
+			body = ctypes.string_at(ace.value, size)
+			if kind in (0, 9):  # ACCESS_ALLOWED, ACCESS_ALLOWED_CALLBACK
+				offset = 8
+			elif kind in (5, 11):  # the two "object" variants carry optional GUIDs before the SID
+				present = int.from_bytes(body[8:12], "little")
+				offset = 12 + (16 if present & 1 else 0) + (16 if present & 2 else 0)
+			else:
+				raise OSError(0, "an entry type in the permissions is not understood")
+			mask = int.from_bytes(body[4:8], "little")
+			text = ctypes.c_void_p()
+			if not advapi32.ConvertSidToStringSidW(ace.value + offset, ctypes.byref(text)):
 				raise ctypes.WinError(ctypes.get_last_error())
 			try:
-				trustee = Trustee()
-				advapi32.BuildTrusteeWithSidW(ctypes.byref(trustee), sid)
-				mask = wintypes.DWORD()
-				status = advapi32.GetEffectiveRightsFromAclW(dacl, ctypes.byref(trustee), ctypes.byref(mask))
-				if status:
-					raise OSError(status, "the permissions of this file could not be read")
-				combined |= mask.value
+				entries.append((ctypes.wstring_at(text.value), mask))
 			finally:
-				kernel32.LocalFree(sid)
-		return combined
+				kernel32.LocalFree(text)
+		return entries
 	finally:
 		kernel32.LocalFree(descriptor)
 
 
-def _check_windows_acl(value: str, rights=None) -> None:
-	"""Refuse a driver that Everyone / Authenticated Users / Users can change, or whose folder they can change.
+def _check_windows_acl(value: str, aces=None) -> None:
+	"""Refuse a driver that anyone outside SYSTEM / Administrators / TrustedInstaller can change.
 
-	The helper loads this DLL in the process that holds the PIN.  The file and its own folder must deny
-	write to those groups; every folder above must deny rename and delete.  Any failure to read a
-	permission is a refusal.
+	The helper loads this DLL in the process that holds the PIN.  The file and its own folder must grant
+	write to no one else; every folder above must grant no one else the right to rename or delete.  Any
+	failure to read a permission is a refusal.
 	"""
-	rights = rights or windows_untrusted_rights
+	aces = aces or windows_allow_aces
 	path = ntpath.normpath(value)
 	level = 0
 	while True:
 		needed = _WRITE_RIGHTS if level < 2 else _REPLACE_RIGHTS
 		try:
-			granted = rights(path)
+			granted = aces(path)
 		except Exception:
 			raise Refused("the permissions of this driver or its folder could not be checked; it was not added.") from None
-		if granted & needed:
-			raise Refused("other users can change this file or its folder; ask your administrator to fix its permissions.")
+		for sid, mask in granted:
+			if sid not in _TRUSTED_SIDS and mask & needed:
+				raise Refused("other users can change this file or its folder; ask your administrator to fix its permissions.")
 		parent = ntpath.dirname(path)
 		if not parent or parent == path:
 			return

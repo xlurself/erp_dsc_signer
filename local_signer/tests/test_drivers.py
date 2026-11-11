@@ -553,36 +553,41 @@ class TestPanelRound6(unittest.TestCase):
 			drivers._check_windows_real_path(r"C:\Program Files\Vendor\x.dll", resolve=lambda p: r"C:\Users\Public\x.dll")
 
 	def test_windows_acl_walk_checks_the_file_its_folder_and_every_folder_above(self):
-		seen = {}
+		seen = []
+		table = {}
 
-		def rights(path):
-			seen[path] = True
-			return table.get(path, 0)
+		def aces(path):
+			seen.append(path)
+			return table.get(path, [("S-1-5-18", 0x1F01FF), ("S-1-5-32-544", 0x1F01FF), ("S-1-5-32-545", 0x1200A9)])
 
 		driver = r"C:\Program Files\Vendor\bin\p11.dll"
-		table = {}
-		drivers._check_windows_acl(driver, rights)
+		drivers._check_windows_acl(driver, aces)
 		self.assertEqual(
-			[driver, r"C:\Program Files\Vendor\bin", r"C:\Program Files\Vendor", r"C:\Program Files", "C:\\"],
-			list(seen),
+			[driver, r"C:\Program Files\Vendor\bin", r"C:\Program Files\Vendor", r"C:\Program Files", "C:\\"], seen
 		)
-		for path, mask in (
-			(driver, 0x2),  # Users can write the file
-			(r"C:\Program Files\Vendor\bin", 0x4),  # ...or add files to its folder
-			(r"C:\Program Files\Vendor", 0x40),  # ...or delete children of a folder above
-			(r"C:\Program Files", 0x10000),  # ...or delete a folder above
+		for path, entry in (
+			(driver, ("S-1-5-32-545", 0x2)),  # Users can write the file
+			(r"C:\Program Files\Vendor\bin", ("S-1-5-11", 0x4)),  # Authenticated Users can add files to its folder
+			(r"C:\Program Files\Vendor", ("S-1-5-32-545", 0x40)),  # delete children of a folder above
+			(r"C:\Program Files", ("S-1-1-0", 0x10000)),  # Everyone can delete a folder above
+			(driver, ("S-1-5-21-1-2-3-1001", 0x1F01FF)),  # a particular user account, not a named group (Codex round 9)
+			(driver, ("S-1-5-21-1-2-3-513", 0x10000000)),  # a domain group with GENERIC_ALL
 		):
-			with self.subTest(path=path):
+			with self.subTest(path=path, entry=entry):
 				table.clear()
-				table[path] = mask
+				table[path] = [entry]
 				with self.assertRaises(drivers.Refused):
-					drivers._check_windows_acl(driver, rights)
+					drivers._check_windows_acl(driver, aces)
+
+	def test_windows_trusted_principals_may_write_and_read_only_entries_are_fine(self):
+		trusted = [("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", 0x1F01FF), ("S-1-3-0", 0x1F01FF)]
+		drivers._check_windows_acl(r"C:\Windows\System32\x.dll", lambda p: trusted + [("S-1-5-21-1-2-3-1001", 0x1200A9)])
 
 	def test_windows_write_to_a_far_folder_is_not_a_replacement_risk_but_write_to_the_folder_is(self):
 		# C:\ lets Authenticated Users create folders (0x4): that cannot replace a file two levels down.
-		drivers._check_windows_acl(r"C:\Vendor\bin\p11.dll", lambda p: 0x4 if p == "C:\\" else 0)
+		drivers._check_windows_acl(r"C:\Vendor\bin\p11.dll", lambda p: [("S-1-5-11", 0x4)] if p == "C:\\" else [])
 		with self.assertRaises(drivers.Refused):
-			drivers._check_windows_acl(r"C:\Windows\Temp\p11.dll", lambda p: 0x6 if p == r"C:\Windows\Temp" else 0)
+			drivers._check_windows_acl(r"C:\Windows\Temp\p11.dll", lambda p: [("S-1-5-32-545", 0x6)] if p == r"C:\Windows\Temp" else [])
 
 	def test_windows_unreadable_permissions_refuse(self):
 		def boom(path):

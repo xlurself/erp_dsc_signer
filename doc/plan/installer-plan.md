@@ -138,8 +138,9 @@ produced a valid file; Adobe's refusal to open it is unexplained (exact message 
 Review fixes (2026-11-11, panel round 6): the LaunchAgent no longer writes stdout/stderr to files (/dev/null; the capped daemon
 log is the record, `--doctor` shows config problems); the crash log is rotated at start when over the size cap (only its last 1 MB is kept as .1); on Windows
 `--add-module` first requires the driver to be under Windows or Program Files (never a network path, never through a link or
-junction), then reads the real permissions (GetNamedSecurityInfoW + GetEffectiveRightsFromAclW through ctypes) and refuses a
-driver that Everyone, Authenticated Users or Users can write, or whose folder they can write, or whose parent folders they can
+junction), then reads every access-allowed entry of the real DACL (GetNamedSecurityInfoW + GetAce through ctypes) and refuses a
+driver, or a folder holding it, on which anyone other than SYSTEM, Administrators, TrustedInstaller or CREATOR OWNER holds write
+rights (an allowlist, so an individual account or a domain group is caught too), and parent folders on which anyone else can
 rename or delete; a permission it cannot read is a refusal (unit-tested with injected rights; the real Windows API call is
 verified on a Windows machine, see section 10); `--install-autostart --yes` /
 `--uninstall-autostart --yes` refuse root (macOS) and an elevated prompt (Windows); `--find-drivers` reads a folder lazily
