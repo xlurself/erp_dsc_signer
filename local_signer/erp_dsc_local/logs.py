@@ -9,7 +9,7 @@ What the daemon writes: startup and shutdown, a signal it received, a request th
 with an unexpected exception (method, a FIXED route name and the exception's CLASS name),
 an exception in a background thread (class name), and a heartbeat every
 ``HEARTBEAT_SECONDS``.  What it never writes: request bodies, PINs, pairing tokens,
-certificates, an exception's text or traceback, a request path that is not one of the
+certificates, an exception's text or traceback in the helper's own records (the trust store's logger writes a short message with a path, never a secret), a request path that is not one of the
 fixed routes, an origin's path or query.  As a second line of defence every record goes
 through ``clean``: control characters are escaped (one record is one line, so a value
 cannot forge a line), a hex run longer than 16 characters is cut to its first 8, a base64 or

@@ -410,11 +410,18 @@ def _finish(steps, *, yes, runner, system, intro, done) -> int:
 	return code
 
 
+def _running_as_root(uid) -> bool:
+	return (os.getuid() if uid is None else uid) == 0
+
+
 def install(config_path, *, yes=False, system=None, runner=None, home=None, uid=None, executable=None, frozen=None, user_id=None, path_exists=None) -> int:
 	system = system or platform.system()
 	if system not in ("Darwin", "Windows"):
 		print(f"Starting the signer at login is not supported on {system} by this tool.", file=sys.stderr)
 		return 1
+	if yes and system == "Darwin" and _running_as_root(uid):
+		print("error: run this as your normal user, not with sudo or as root: the login item belongs to the user who signs.", file=sys.stderr)
+		return 2
 	try:
 		config, arguments = _prepare(config_path, system, executable, frozen, path_exists)
 		if system == "Darwin":
@@ -440,6 +447,9 @@ def uninstall(config_path=None, *, yes=False, system=None, runner=None, home=Non
 	if system not in ("Darwin", "Windows"):
 		print(f"Starting the signer at login is not supported on {system} by this tool.", file=sys.stderr)
 		return 1
+	if yes and system == "Darwin" and _running_as_root(uid):
+		print("error: run this as your normal user, not with sudo or as root.", file=sys.stderr)
+		return 2
 	try:
 		if system == "Darwin":
 			home = Path(home or Path.home())

@@ -259,11 +259,29 @@ def _signature_metadata(pdf_bytes, settings, signer_name, now, tz_offset):
 	}
 
 
+def check_invoice_print_format(print_format) -> None:
+	"""The invoice template the signed PDF is made from: chosen, existing, enabled, for Sales Invoice."""
+	name = (print_format or "").strip() if isinstance(print_format, str) else ""
+	if not name:
+		frappe.throw(_("Select the Sales Invoice template (Print Format) before saving."))
+	row = frappe.db.get_value("Print Format", name, ["doc_type", "disabled"], as_dict=True)
+	if not row:
+		frappe.throw(_("The selected Print Format does not exist."))
+	if row.doc_type != "Sales Invoice":
+		frappe.throw(_("The selected Print Format is not a Sales Invoice template."))
+	if frappe.utils.cint(row.disabled):
+		frappe.throw(_("The selected Print Format is disabled. Choose an enabled Sales Invoice template."))
+
+
 def generate_invoice_pdf(doc, print_format: str | None = None, letterhead: str | None = None) -> bytes:
 	settings = frappe.get_single("DSC Signing Settings")
 	print_format = print_format or settings.get("default_print_format")
 	if not print_format:
 		frappe.throw(_("Set a Default Print Format in DSC Signing Settings."))
+	# The caller may pass its own format (whitelisted API): it gets the same checks as the setting, so a
+	# format for another doctype, a disabled one, or one that does not exist (Frappe would fall back to
+	# Standard) can never be what the company key signs.
+	check_invoice_print_format(print_format)
 
 	kwargs = {
 		"doctype": doc.doctype,

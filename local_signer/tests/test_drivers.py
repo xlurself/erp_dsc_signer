@@ -312,9 +312,10 @@ class TestAddModuleRefuses(AddModuleCase):
 		self.assertEqual(0, self.add(self.library)[0])
 		self.original = self.config.read_bytes()
 		backup = (self.config_dir / "config.json.bak").read_bytes()
-		code, _out, err = self.add(self.library)
-		self.assertNotEqual(0, code)
-		self.assertIn("already", err)
+		code, out, err = self.add(self.library)  # re-running an installer script must not fail
+		self.assertEqual(0, code, err)
+		self.assertIn("already", out)
+		self.assertNotIn("Added", out)
 		self.assertEqual(self.original, self.config.read_bytes())
 		self.assertEqual(backup, (self.config_dir / "config.json.bak").read_bytes())
 
@@ -450,3 +451,86 @@ class TestDriverBitness(unittest.TestCase):
 		with self.assertRaises(drivers.Refused) as mac:
 			drivers.check_module_path("vendor/x.dylib", system="Darwin")
 		self.assertIn("/usr/local/lib", mac.exception.message)
+
+
+class TestReviewFindings(unittest.TestCase):
+	"""Independent review 2026-11-11 of 61f087d..HEAD."""
+
+	def test_every_built_in_driver_name_is_found_by_find_drivers(self):
+		import ntpath
+
+		names = set()
+		for system, groups in KNOWN_PATHS.items():
+			for paths in groups.values():
+				names.update(ntpath.basename(p) if system == "Windows" else os.path.basename(p) for p in paths)
+		missed = sorted(n for n in names if not drivers._looks_like_driver(n))
+		self.assertEqual([], missed)
+		self.assertFalse(drivers._looks_like_driver("msvcp110.dll"))
+
+	def test_an_x64_python_on_arm64_windows_is_x64(self):
+		with mock.patch("sysconfig.get_platform", return_value="win-amd64"), mock.patch("platform.machine", return_value="ARM64"):
+			self.assertEqual("x64", drivers.python_architecture())
+		with mock.patch("sysconfig.get_platform", return_value="win-arm64"):
+			self.assertEqual("arm64", drivers.python_architecture())
+		with mock.patch("sysconfig.get_platform", return_value="win32"):
+			self.assertEqual("x86", drivers.python_architecture())
+
+	def test_install_autostart_refuses_root(self):
+		from erp_dsc_local import autostart
+
+		ran = []
+		err = io.StringIO()
+		with contextlib.redirect_stderr(err):
+			code = autostart.install("config.json", yes=True, system="Darwin", uid=0, runner=lambda *a, **k: ran.append(a))
+		self.assertEqual(2, code)
+		self.assertEqual([], ran)
+		self.assertIn("not with sudo", err.getvalue())
+
+
+@unittest.skipUnless(POSIX, "POSIX permission bits")
+class TestDriverFolderPermissions(unittest.TestCase):
+	def setUp(self):
+		self.root = Path(tempfile.mkdtemp(prefix="erp-dsc-perm-"))
+		self.addCleanup(shutil.rmtree, self.root, True)
+		self.deep = self.root / "a" / "b"
+		self.deep.mkdir(parents=True)
+		self.library = self.deep / "libTestVendorPKCS11.dylib"
+		self.library.write_bytes(b"x")
+		os.chmod(self.library, 0o755)
+		for folder in (self.root, self.root / "a", self.deep):
+			os.chmod(folder, 0o755)
+
+	def check(self):
+		return drivers.check_module_path(str(self.library), system="Darwin")
+
+	def test_a_private_tree_is_accepted(self):
+		self.assertEqual(str(self.library), self.check())
+
+	def test_group_write_on_the_file_is_refused(self):
+		os.chmod(self.library, 0o775)
+		with self.assertRaises(drivers.Refused):
+			self.check()
+
+	def test_group_write_on_the_folder_or_a_folder_above_is_refused(self):
+		for folder in (self.deep, self.root / "a", self.root):
+			with self.subTest(folder=str(folder)):
+				os.chmod(folder, 0o775)
+				with self.assertRaises(drivers.Refused):
+					self.check()
+				os.chmod(folder, 0o755)
+
+	def test_a_folder_above_owned_by_another_user_is_refused(self):
+		real = os.lstat
+		other = os.getuid() + 4242
+
+		def fake(path, *a, **k):
+			info = real(path, *a, **k)
+			if os.fspath(path) == str(self.root / "a"):
+				fields = list(info)
+				fields[4] = other
+				return os.stat_result(fields)
+			return info
+
+		with mock.patch.object(os, "lstat", side_effect=fake), self.assertRaises(drivers.Refused) as ctx:
+			self.check()
+		self.assertIn("owned by another user", ctx.exception.message)

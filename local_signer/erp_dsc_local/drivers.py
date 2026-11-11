@@ -9,9 +9,10 @@ link whose target is outside the folder being searched.  Nothing is opened or lo
 loaded in this process: the optional ``--verify`` asks the killable probe child
 (``token.run_probe``), the same one the daemon uses.  The path must be absolute, plain (no
 "..", no control character, not a link), a regular readable file with a library
-extension, and on POSIX neither the file nor its folder may be writable by other users, and
-the file must belong to the user or to root.  A path already configured or already a
-built-in location is refused.  config.json is rewritten atomically (temp file in the same
+extension, and on POSIX neither the file nor any folder above it may be writable by the
+group or others (a sticky folder is allowed), and the file and those folders must belong to the
+user or to root.  A path already configured or already a built-in location is a success that
+changes nothing (exit 0), so an installer script can be run twice.  config.json is rewritten atomically (temp file in the same
 folder, validated with ``load_config``, ``os.replace``) after its previous bytes are saved,
 also atomically, as ``config.json.bak``; both are 0600.  A config.json that is a link or
 does not load is never rewritten.
@@ -27,6 +28,7 @@ import os
 import platform
 import re
 import struct
+import sysconfig
 import stat
 import sys
 import tempfile
@@ -45,7 +47,9 @@ from .token import PROBE_TIMEOUT_SECONDS, TokenDriverNotResponding, run_probe
 NAME_NEEDLES = ("pkcs11", "castle", "wdpkcs", "etpkcs", "signature", "innait", "etoken")
 LIBRARY_SUFFIXES = (".dylib", ".so", ".dll")
 # "p11" only as a word part (SignatureP11, libdeep_p11), never inside msvcp110.
-_P11_WORD = re.compile(r"(?:^|[^a-z0-9])p11(?:[^0-9]|$)|signaturep11|wdp11")
+_P11_WORD = re.compile(r"(?:^|[^a-z0-9])p11(?:[^0-9]|$)")
+# ...or a name that ENDS in p11 / csp11, with an optional version (ProxKeyP11, eps2003csp11v2); never msvcp110.
+_P11_STEM = re.compile(r"p11(?:v\d+)?$")
 # Look-alikes seen on a real Windows machine: .NET BouncyCastle, p11-kit, Java's j2pkcs11.
 NOT_DRIVERS = ("bouncycastle", "p11-kit", "j2pkcs11", "minidriver", "interop", "innaitcsp")
 _VERSIONED_SO = re.compile(r"\.so(?:\.[0-9]+)+$")
@@ -74,7 +78,8 @@ def _looks_like_driver(name: str) -> bool:
 	lower = name.lower()
 	if not plausible_library_name(name) or any(word in lower for word in NOT_DRIVERS):
 		return False
-	return any(needle in lower for needle in NAME_NEEDLES) or bool(_P11_WORD.search(lower))
+	stem = lower.rsplit(".", 1)[0]
+	return any(needle in lower for needle in NAME_NEEDLES) or bool(_P11_WORD.search(lower)) or bool(_P11_STEM.search(stem))
 
 
 def scan_roots(system=None, env=None) -> list:
@@ -181,6 +186,13 @@ def driver_architecture(path: str) -> str | None:
 
 
 def python_architecture() -> str:
+	build = sysconfig.get_platform().lower()  # the interpreter's build: an x64 Python on ARM64 Windows is "win-amd64"
+	if "arm64" in build or "aarch64" in build:
+		return "arm64"
+	if "amd64" in build or "x86_64" in build:
+		return "x64"
+	if build == "win32":
+		return "x86"
 	if platform.machine().lower() in ("arm64", "aarch64"):
 		return "arm64"
 	return "x64" if struct.calcsize("P") == 8 else "x86"
@@ -263,14 +275,35 @@ def check_module_path(value, *, system=None) -> str:
 	if not plausible_library_name(os.path.basename(value)):
 		raise Refused(f"{_printable(value)} is not a library file (.dylib, .so or .dll).")
 	if os.name != "nt":
-		parent = os.path.dirname(value)
-		if info.st_mode & stat.S_IWOTH or os.lstat(parent).st_mode & stat.S_IWOTH:
-			raise Refused("other users can change this file or its folder; ask your administrator to fix its permissions.")
-		if info.st_uid not in (0, os.getuid()):
-			raise Refused("the file is owned by another user; ask your administrator to install the driver properly.")
+		_check_not_replaceable(value, info)
 	if not os.access(value, os.R_OK):
 		raise Refused(f"{_printable(value)} cannot be read.")
 	return value
+
+
+def _check_not_replaceable(value: str, info) -> None:
+	"""The file and every folder above it: no group/other write (a sticky folder is fine), owned by root or the user.
+
+	The helper later loads this library in the process that holds the PIN, so anyone who can swap it
+	can read the PIN.
+	"""
+	me = os.getuid()
+	if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+		raise Refused("other users can change this file or its folder; ask your administrator to fix its permissions.")
+	if info.st_uid not in (0, me):
+		raise Refused("the file is owned by another user; ask your administrator to install the driver properly.")
+	folder = os.path.dirname(value)
+	while True:
+		meta = os.lstat(folder)
+		sticky = bool(meta.st_mode & stat.S_ISVTX)
+		if meta.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not sticky:
+			raise Refused("other users can change this file or its folder; ask your administrator to fix its permissions.")
+		if meta.st_uid not in (0, me):
+			raise Refused("a folder above the file is owned by another user; ask your administrator to install the driver properly.")
+		parent = os.path.dirname(folder)
+		if parent == folder:
+			return
+		folder = parent
 
 
 def _module_id(path: str) -> str:
@@ -324,6 +357,7 @@ def _read_config(config: Path) -> tuple[bytes, dict]:
 
 
 _ALREADY_KNOWN = "it is already known to the helper"
+_ALREADY_PREFIXES = (_ALREADY_KNOWN, "it is already in config.json", "it is already listed in config.json")
 
 
 def _duplicate(path: str, raw: dict, system: str) -> str | None:
@@ -369,7 +403,7 @@ def add_module(config_path, module_path, *, verify=False, probe=None, system=Non
 		path = check_module_path(module_path, system=system)
 		duplicate = _duplicate(path, raw, system)
 		if duplicate:
-			if duplicate.startswith(_ALREADY_KNOWN):
+			if duplicate.startswith(_ALREADY_PREFIXES):
 				print(f"{_printable(path)} was not added: {duplicate}")
 				return 0  # nothing to do is success: installer scripts must not fail on a built-in path
 			raise Refused(f"{_printable(path)} was not added: {duplicate}")

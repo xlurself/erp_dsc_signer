@@ -65,3 +65,23 @@ class PrintFormatCheckTests(unittest.TestCase):
 		):
 			document.validate()
 		self.assertEqual([""], calls)
+
+
+class SigningTimePrintFormatTests(unittest.TestCase):
+	"""Review 2026-11-11: the whitelisted signing API can pass its own print_format."""
+
+	def test_generate_invoice_pdf_checks_the_format_actually_used(self):
+		from erp_dsc_signer.utils import pdf_signer
+
+		checked = []
+		doc = mock.Mock(doctype="Sales Invoice")
+		doc.name = "SINV-1"
+		settings = {"default_print_format": "Saved Default"}
+		with mock.patch.object(frappe, "get_single", return_value=frappe._dict(settings)), mock.patch.object(
+			pdf_signer, "check_invoice_print_format", side_effect=lambda value: checked.append(value) or (_ for _ in ()).throw(RuntimeError("stop"))
+		):
+			with self.assertRaises(RuntimeError):
+				pdf_signer.generate_invoice_pdf(doc, "Caller Choice")
+			with self.assertRaises(RuntimeError):
+				pdf_signer.generate_invoice_pdf(doc, None)
+		self.assertEqual(["Caller Choice", "Saved Default"], checked)

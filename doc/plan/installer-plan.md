@@ -72,7 +72,7 @@ never runs with more rights than the user.
 | 4 | Signed-update check, uninstall, all-users/IT package, one-page admin guide | 3-4 days |
 Total about 3 to 4 working weeks for both systems, mostly spent testing on real machines and tokens.
 
-## 7a. Phase 1 as built (2026-11-10, not committed yet)
+## 7a. Phase 1 as built (2026-11-10, committed in a415024)
 What exists now in `local_signer/` (all commands are explicit; nothing runs by itself yet):
 - `erp-dsc-local --doctor [--config PATH]`: plain-text support report (`doctor.py`). System, helper and Python version, config
   path and whether it loads, port free / in use / in use by this helper, how many sites are allowed (never which), log path,
@@ -83,7 +83,7 @@ What exists now in `local_signer/` (all commands are explicit; nothing runs by i
   `/opt`, `/Library`; Windows `System32`, `SysWOW64`, `Program Files*`), shallow, bounded (50 000 entries, 10 s), no symlinked
   folders, nothing loaded (`drivers.py`).
 - `erp-dsc-local --add-module PATH [--verify]`: validates the file (absolute, plain, regular, library extension, readable, not
-  replaceable by other users) and adds it to `providers.custom_modules`, atomically, with `config.json.bak`; `--verify` asks the
+  replaceable by the group or others, nor any folder above it, owned by root or the user) and adds it to `providers.custom_modules`, atomically, with `config.json.bak`; `--verify` asks the
   probe child first. Never loads the library in the helper's own process.
 - Driver paths: InnaitKey `/opt/Precision_Biometric/InnaITDSC/libraries/libInnaITPKCS11Driver.dylib` (as Generic PKCS#11: the
   ERP server accepts only its fixed provider list) and ePass `/usr/local/lib/libcastle_v2.1.0.0.dylib`.
@@ -123,3 +123,18 @@ upgrade over an older version; uninstall leaves nothing running; pairing refused
    of tens of MB would fit; to be confirmed once built.)
 
 Revised order: Phase 1, then Phase 3 (Windows), then Phase 2 (macOS), then Phase 4.
+
+## 10. Windows pilot results (2026-11-10 and 11, Windows 11, Python 3.14 64-bit, WatchData ProxKey, Frappe Cloud site)
+Rounds 1 to 3 (commits a415024, b28d300, 5beb2da): install, `--find-drivers`, `--doctor` (certificate read from the x64
+`System32\SignatureP11.dll` with no PIN), `--add-module`, `--install-autostart` dry run, health, Ctrl+C clean stop: PASS after the
+fixes recorded in those commits (valid example config, one version number, built-in `--add-module` exits 0, look-alike
+files filtered, 32-bit drivers tagged, packaging with a `logs` folder).
+First real signing on Windows against a Frappe Cloud site: the PDF was produced and its signature verifies (digest and RSA
+signature checked independently). Two defects were found and fixed: the timestamp request failed on a network that blocks the
+timestamp server (now off by default), and the signing time was the site clock labelled with the server zone (Adobe: "signed in
+future"). NOT yet tested on Windows: `--install-autostart --yes`, log off and on, the PIN window focus, pairing from a second
+browser, Windows 10, 32-bit Python, an InnaIT token. The Mac signing with the InnaitKey organisation DSC on the same site
+produced a valid file; Adobe's refusal to open it is unexplained (exact message requested).
+Known residuals from the 2026-11-11 independent review: a failing auto-start can restart forever and its stderr file
+(launchd-stderr.log) is not size-capped; signing/probe failure lines go to stderr only (lost under pythonw on Windows);
+the crash log is not capped; the daemon itself does not skip 32-bit drivers (the doctor and `--find-drivers` do).
