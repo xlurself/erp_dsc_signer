@@ -342,7 +342,8 @@ _REPLACE_RIGHTS = 0x40 | 0x10000 | 0x40000 | 0x80000 | _GENERIC_WRITE
 
 
 def windows_allow_aces(path: str) -> list:
-	"""Every ACCESS-ALLOWED entry in ``path``'s DACL as ``(sid_text, access_mask)``.  Windows only.
+	"""Every ACCESS-ALLOWED entry in ``path``'s DACL as ``(sid_text, access_mask)``, plus the owner (who can always
+	rewrite the permissions) as an entry holding WRITE_DAC and WRITE_OWNER.  Windows only.
 
 	Entries that only apply to children (inherit-only) and deny entries are skipped; a missing DACL means
 	everyone may do everything.  An entry type this function does not understand raises ``OSError``
@@ -370,18 +371,28 @@ def windows_allow_aces(path: str) -> list:
 	advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
 	advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
 
-	dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
-	# SE_FILE_OBJECT = 1, DACL_SECURITY_INFORMATION = 4
-	status = advapi32.GetNamedSecurityInfoW(path, 1, 4, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+	owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+	# SE_FILE_OBJECT = 1, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION = 1 | 4
+	status = advapi32.GetNamedSecurityInfoW(path, 1, 5, ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
 	if status:
 		raise OSError(status, "the permissions of this file could not be read")
 	try:
 		if not dacl.value:
 			return [("S-1-1-0", 0xFFFFFFFF)]  # no DACL: everyone has full access
+		if not owner.value:
+			raise OSError(0, "the owner of this file could not be read")
+		owner_text = ctypes.c_void_p()
+		if not advapi32.ConvertSidToStringSidW(owner.value, ctypes.byref(owner_text)):
+			raise ctypes.WinError(ctypes.get_last_error())
+		try:
+			# The owner can always rewrite the permissions (WRITE_DAC) and take ownership, whatever the DACL says.
+			owner_entry = (ctypes.wstring_at(owner_text.value), 0x40000 | 0x80000)
+		finally:
+			kernel32.LocalFree(owner_text)
 		info = AclSizeInformation()
 		if not advapi32.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):  # AclSizeInformation
 			raise ctypes.WinError(ctypes.get_last_error())
-		entries = []
+		entries = [owner_entry]
 		for index in range(info.AceCount):
 			ace = ctypes.c_void_p()
 			if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):

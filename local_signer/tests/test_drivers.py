@@ -572,6 +572,8 @@ class TestPanelRound6(unittest.TestCase):
 			(r"C:\Program Files", ("S-1-1-0", 0x10000)),  # Everyone can delete a folder above
 			(driver, ("S-1-5-21-1-2-3-1001", 0x1F01FF)),  # a particular user account, not a named group (Codex round 9)
 			(driver, ("S-1-5-21-1-2-3-513", 0x10000000)),  # a domain group with GENERIC_ALL
+			(driver, ("S-1-5-21-1-2-3-1001", 0x40000 | 0x80000)),  # an ordinary owner: can always rewrite the permissions
+			(r"C:\Program Files\Vendor", ("S-1-5-21-1-2-3-1001", 0x40000 | 0x80000)),  # ...of any folder above too
 		):
 			with self.subTest(path=path, entry=entry):
 				table.clear()
