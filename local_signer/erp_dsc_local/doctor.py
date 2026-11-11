@@ -22,6 +22,7 @@ import platform
 import sys
 from pathlib import Path
 
+from . import drivers
 from .certificates import is_signing_certificate
 from .cli import _printable
 from .config import SignerConfig, load_config
@@ -177,7 +178,8 @@ def report_lines(config_path=None, *, system=None, client_factory=None, trust_st
 	lines.append(f"Token driver locations the helper knows ({len(listed)})")
 	for module in listed[:MAX_LISTED_MODULES]:
 		state = "found  " if module["available"] else "missing"
-		lines.append(f"  {state}  {PROVIDER_LABELS[module['provider']]:<16} {printable(module['path'], 300)}")
+		wrong = drivers.unusable_reason(module["path"]) if module["available"] else None
+		lines.append(f"  {state}  {PROVIDER_LABELS[module['provider']]:<16} {printable(module['path'], 300)}" + (f"  ({wrong})" if wrong else ""))
 	if len(listed) > MAX_LISTED_MODULES:
 		lines.append(NOT_SHOWN.format(count=len(listed) - MAX_LISTED_MODULES))
 	lines.append("")
@@ -190,6 +192,10 @@ def report_lines(config_path=None, *, system=None, client_factory=None, trust_st
 	if not available:
 		lines.append("  No token driver was found. Install the driver from the token's maker, or run erp-dsc-local --find-drivers.")
 	for module in available[:MAX_CHECKED_MODULES]:
+		wrong = drivers.unusable_reason(module.path)
+		if wrong:
+			lines.append(f"  {PROVIDER_LABELS.get(module.provider, module.provider)}  {printable(module.path, 300)}: skipped ({wrong})")
+			continue
 		lines += _token_check(module, client_factory)
 	if len(available) > MAX_CHECKED_MODULES:
 		lines.append(NOT_SHOWN.format(count=len(available) - MAX_CHECKED_MODULES) + " (drivers not checked)")

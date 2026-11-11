@@ -26,6 +26,7 @@ import ntpath
 import os
 import platform
 import re
+import struct
 import stat
 import sys
 import tempfile
@@ -46,7 +47,7 @@ LIBRARY_SUFFIXES = (".dylib", ".so", ".dll")
 # "p11" only as a word part (SignatureP11, libdeep_p11), never inside msvcp110.
 _P11_WORD = re.compile(r"(?:^|[^a-z0-9])p11(?:[^0-9]|$)|signaturep11|wdp11")
 # Look-alikes seen on a real Windows machine: .NET BouncyCastle, p11-kit, Java's j2pkcs11.
-NOT_DRIVERS = ("bouncycastle", "p11-kit", "j2pkcs11")
+NOT_DRIVERS = ("bouncycastle", "p11-kit", "j2pkcs11", "minidriver", "interop", "innaitcsp")
 _VERSIONED_SO = re.compile(r"\.so(?:\.[0-9]+)+$")
 MAX_ENTRIES = 50_000
 MAX_SECONDS = 10.0
@@ -160,6 +161,39 @@ def _known_paths(config_path, system) -> set:
 	return {os.path.normcase(os.path.normpath(path)) for path in paths}
 
 
+_PE_MACHINES = {0x8664: "x64", 0x014C: "x86", 0xAA64: "arm64"}
+_BITS = {"x64": "64-bit", "x86": "32-bit", "arm64": "ARM64"}
+
+
+def driver_architecture(path: str) -> str | None:
+	"""'x64', 'x86' or 'arm64' read from a Windows DLL's header; None for anything else.  Reads 4 KB, never loads it."""
+	try:
+		with open(path, "rb") as handle:
+			head = handle.read(4096)
+	except OSError:
+		return None
+	if head[:2] != b"MZ" or len(head) < 0x40:
+		return None
+	offset = int.from_bytes(head[0x3C:0x40], "little")
+	if offset + 6 > len(head) or head[offset : offset + 4] != b"PE\0\0":
+		return None
+	return _PE_MACHINES.get(int.from_bytes(head[offset + 4 : offset + 6], "little"))
+
+
+def python_architecture() -> str:
+	if platform.machine().lower() in ("arm64", "aarch64"):
+		return "arm64"
+	return "x64" if struct.calcsize("P") == 8 else "x86"
+
+
+def unusable_reason(path: str) -> str | None:
+	"""Why this running Python cannot use the driver file (wrong bitness), or None when it can or we cannot tell."""
+	driver, own = driver_architecture(path), python_architecture()
+	if driver is None or driver == own:
+		return None
+	return f"{_BITS[driver]} driver; this Python is {_BITS[own]} and cannot use it"
+
+
 def _shown(path: str) -> str:
 	text = _printable(path)
 	return text if text == path else text + "  (the name has hidden characters; shown without them)"
@@ -174,6 +208,9 @@ def find_drivers_command(config_path, *, system=None) -> int:
 	result = find_drivers(roots)
 	for path in result.candidates:
 		suffix = "  (already known to the helper)" if os.path.normcase(os.path.normpath(path)) in known else ""
+		wrong = unusable_reason(path)
+		if wrong:
+			suffix += f"  ({wrong})"
 		print(f"  {_shown(path)}{suffix}")
 	if not result.candidates:
 		print("  (none found in these folders)")
@@ -207,7 +244,8 @@ def check_module_path(value, *, system=None) -> str:
 		raise Refused("the path contains a control character.")
 	pathmod = ntpath if system == "Windows" else os.path
 	if not pathmod.isabs(value) or (system == "Windows" and not ntpath.splitdrive(value)[0]):
-		raise Refused("give the absolute path of the driver file, for example /usr/local/lib/libvendor-pkcs11.dylib.")
+		example = r"C:\Windows\System32\vendor-pkcs11.dll" if system == "Windows" else "/usr/local/lib/libvendor-pkcs11.dylib"
+		raise Refused(f"give the absolute path of the driver file, for example {example}.")
 	if ".." in re.split(r"[\\/]", value):
 		raise Refused("the path must not contain '..'; give the plain path of the file.")
 	try:

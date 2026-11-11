@@ -390,3 +390,63 @@ class TestCliAddModule(AddModuleCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+def _pe(directory, name, machine, *, offset=0x80):
+	path = Path(directory) / name
+	head = bytearray(offset + 6)
+	head[0:2] = b"MZ"
+	head[0x3C:0x40] = offset.to_bytes(4, "little")
+	head[offset : offset + 4] = b"PE\0\0"
+	head[offset + 4 : offset + 6] = machine.to_bytes(2, "little")
+	path.write_bytes(bytes(head))
+	return str(path)
+
+
+class TestDriverBitness(unittest.TestCase):
+	def setUp(self):
+		self.dir = tempfile.mkdtemp(prefix="erp-dsc-pe-")
+		self.addCleanup(shutil.rmtree, self.dir, True)
+
+	def test_reads_the_machine_field(self):
+		self.assertEqual("x64", drivers.driver_architecture(_pe(self.dir, "a.dll", 0x8664)))
+		self.assertEqual("x86", drivers.driver_architecture(_pe(self.dir, "b.dll", 0x014C)))
+		self.assertEqual("arm64", drivers.driver_architecture(_pe(self.dir, "c.dll", 0xAA64)))
+
+	def test_not_a_windows_dll_is_unknown_not_unusable(self):
+		other = Path(self.dir) / "libx.dylib"
+		other.write_bytes(b"\xcf\xfa\xed\xfe" + bytes(100))
+		self.assertIsNone(drivers.driver_architecture(str(other)))
+		self.assertIsNone(drivers.driver_architecture(str(Path(self.dir) / "missing.dll")))
+		self.assertIsNone(drivers.unusable_reason(str(other)))
+
+	def test_wrong_bitness_is_reported_with_plain_words(self):
+		x86 = _pe(self.dir, "SignatureP11.dll", 0x014C)
+		with mock.patch.object(drivers, "python_architecture", return_value="x64"):
+			self.assertIn("32-bit driver; this Python is 64-bit and cannot use it", drivers.unusable_reason(x86))
+			self.assertIsNone(drivers.unusable_reason(_pe(self.dir, "ok.dll", 0x8664)))
+		with mock.patch.object(drivers, "python_architecture", return_value="x86"):
+			self.assertIn("64-bit driver; this Python is 32-bit", drivers.unusable_reason(_pe(self.dir, "n.dll", 0x8664)))
+
+	def test_find_drivers_tags_the_wrong_bitness(self):
+		library = _pe(self.dir, "SignatureP11.dll", 0x014C)
+		out = io.StringIO()
+		with mock.patch.object(drivers, "python_architecture", return_value="x64"), mock.patch.object(
+			drivers, "scan_roots", return_value=[(self.dir, 1)]
+		), contextlib.redirect_stdout(out):
+			drivers.find_drivers_command(Path(self.dir) / "config.json", system="Windows")
+		self.assertRegex(out.getvalue(), r"SignatureP11\.dll.*32-bit driver; this Python is 64-bit")
+
+	def test_look_alikes_seen_on_windows_are_not_drivers(self):
+		for name in ("InnaITCSP.dll", "InnaITSmartCardMiniDriver.dll", "Pkcs11Interop.dll"):
+			with self.subTest(name=name):
+				self.assertFalse(drivers._looks_like_driver(name))
+		self.assertTrue(drivers._looks_like_driver("HS2003-pkcs11.dll"))
+
+	def test_relative_path_example_matches_the_system(self):
+		with self.assertRaises(drivers.Refused) as win:
+			drivers.check_module_path("vendor\\x.dll", system="Windows")
+		self.assertIn("C:\\Windows", win.exception.message)
+		with self.assertRaises(drivers.Refused) as mac:
+			drivers.check_module_path("vendor/x.dylib", system="Darwin")
+		self.assertIn("/usr/local/lib", mac.exception.message)

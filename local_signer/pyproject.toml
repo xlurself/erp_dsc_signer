@@ -9,6 +9,9 @@ requires-python = ">=3.10"
 # cryptography>=42: endesive.pdf imports cryptography.x509.verification, absent in 41.
 dependencies = ["PyKCS11>=1.5.12", "endesive>=2.19.0,<3", "cryptography>=42", "attrs>=22"]
 
+[tool.setuptools.packages.find]
+include = ["erp_dsc_local*"]
+
 [tool.setuptools.dynamic]
 version = {attr = "erp_dsc_local.__version__"}
 

@@ -157,6 +157,13 @@ class TestOutcomes(DoctorCase):
 		_code, text = self.report({MODULE_A: missing, MODULE_B: missing})
 		self.assertIn("PyKCS11 is not installed", text)
 
+	def test_a_wrong_bitness_driver_is_tagged_and_never_probed(self):
+		with mock.patch("erp_dsc_local.drivers.unusable_reason", side_effect=lambda p: "32-bit driver; this Python is 64-bit and cannot use it" if p == MODULE_B else None):
+			code, text = self.report({MODULE_A: TokenUnavailable(), MODULE_B: AssertionError("probed a 32-bit driver")})
+		self.assertEqual(0, code)
+		self.assertIn("skipped (32-bit driver; this Python is 64-bit and cannot use it)", text)
+		self.assertEqual(["certificates"], self.calls)
+
 	def test_missing_modules_are_listed_but_never_asked(self):
 		code, text = self.report({MODULE_A: TokenUnavailable()}, existing=(MODULE_A,))
 		self.assertEqual(0, code)
