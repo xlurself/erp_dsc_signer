@@ -29,6 +29,7 @@ from erp_dsc_signer.utils.pdf_signer import (
 	get_signing_settings,
 	load_pfx_credentials,
 	sign_pdf_bytes,
+	signing_now,
 )
 from erp_dsc_signer.utils.usb_signer import (
 	USBSignatureError,
@@ -194,7 +195,7 @@ def authenticate_usb_certificate(session_id, certificate_der_base64):
 
 
 def _stamp_metadata_for(der, payload):
-	now = frappe.utils.now_datetime().astimezone()
+	now = signing_now()
 	holder = _stamp_holder_name(_cert_cn(x509.load_der_x509_certificate(der)))
 	pdf_bytes = base64.b64decode(payload["pdf_base64"], validate=True)
 	return _signature_metadata(pdf_bytes, get_signing_settings(USB_METHOD), holder, now, _format_tz_offset(now))

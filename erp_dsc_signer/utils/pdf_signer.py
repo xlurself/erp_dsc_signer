@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import frappe
 from cryptography.hazmat import backends
@@ -182,7 +183,7 @@ def sign_pdf_bytes(pdf_bytes: bytes, settings, credentials=None) -> bytes:
 		credentials = load_pfx_credentials(get_pfx_bytes(settings), pfx_password)
 	key, cert, othercerts = credentials
 
-	now = frappe.utils.now_datetime().astimezone()
+	now = signing_now()
 	tz_offset = _format_tz_offset(now)
 	signer_name = stamp_holder_name((settings.get("signer_name") or "").strip() or _cert_cn(cert))
 	signature_meta = _signature_metadata(pdf_bytes, settings, signer_name, now, tz_offset)
@@ -327,6 +328,20 @@ def _unlink_previous_signed_file(doc):
 	if old_name:
 		# Never delete the old File: detaching only the field preserves the audit trail.
 		frappe.db.set_value("File", old_name, "attached_to_field", None)
+
+
+def signing_now() -> datetime:
+	"""The real current instant, shown in the site's time zone (UTC when that is unknown).
+
+	``frappe.utils.now_datetime()`` is the site's wall clock with no zone attached; calling
+	``.astimezone()`` on it labels it with the SERVER's zone, which on Frappe Cloud (UTC) while the
+	site is in Asia/Kolkata makes the signature look 5.5 hours in the future.
+	"""
+	moment = datetime.now(timezone.utc)
+	try:
+		return moment.astimezone(ZoneInfo(frappe.utils.get_system_timezone()))
+	except Exception:  # unknown or missing zone name: UTC is correct and unambiguous
+		return moment
 
 
 def _format_tz_offset(dt) -> str:
