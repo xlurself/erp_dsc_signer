@@ -399,7 +399,7 @@ def windows_allow_aces(path: str) -> list:
 				raise ctypes.WinError(ctypes.get_last_error())
 			header = ctypes.string_at(ace.value, 4)
 			kind, flags, size = header[0], header[1], int.from_bytes(header[2:4], "little")
-			if size < 8 or size > info.AclBytesInUse:  # never read past the ACL the system says it has
+			if size < 8 or (ace.value - dacl.value) + size > info.AclBytesInUse:  # never read past the end of the ACL
 				raise OSError(0, "an entry in the permissions has an impossible size")
 			if kind in (1, 6, 10, 12):  # deny entries only remove rights
 				continue

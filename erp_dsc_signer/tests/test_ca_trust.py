@@ -1083,8 +1083,20 @@ class HttpsTwinTest(_Base):
 		with mock.patch.object(ca_trust, "_crl_urls", return_value=[self.CRL]):
 			self.assertIsNone(ca_trust._check_crl(MAIN.sub, MAIN.root, NOW, network))
 		self.assertEqual([u for u, _ in calls], [self.CRL, self.CRL.replace("http://", "https://", 1)])
-		self.assertNotIn(("https://ocvs.gov.in", True), calls)
 		self.assertEqual([f for _, _, f in network.failures], ["timeout", "timeout"])
+
+	def test_ocsp_post_is_never_upgraded_even_on_a_cca_host(self):
+		calls = []
+
+		def fetch(url, **kw):
+			calls.append((url, kw.get("data") is not None))
+			raise TimeoutError()
+
+		ocsp_url = "http://cca.gov.in/ocsp"
+		network = ca_trust._Network(fetch, ca_trust.DEFAULT_ALLOWED_HOSTS)
+		with mock.patch.object(ca_trust, "_aia_urls", return_value=[ocsp_url]):
+			self.assertIsNone(ca_trust._check_ocsp(MAIN.sub, MAIN.root, NOW, network))
+		self.assertEqual(calls, [(ocsp_url, True)])  # one POST, no https twin
 
 	def test_a_hostile_twin_target_is_never_fetched(self):
 		called = []
@@ -1138,6 +1150,33 @@ class HttpsTwinTest(_Base):
 				transport("http://cca.gov.in/x", max_bytes=10, timeout=25)
 		release.set()
 		self.assertLess(time.monotonic() - started, 2.0)
+
+	def test_stalled_lookups_cannot_accumulate_threads(self):
+		release = threading.Event()
+		started = []
+
+		def resolver(*a, **kw):
+			started.append(1)
+			release.wait(5)
+			return [(2, 1, 6, "", ("93.184.216.34", 80))]
+
+		transport = ca_trust.HttpTransport(resolver=resolver, connector=lambda *a, **kw: self.fail("must not connect"))
+		try:
+			with mock.patch.object(ca_trust, "RESOLVE_TIMEOUT", 0.05):
+				for _ in range(ca_trust.MAX_RESOLVER_THREADS + 6):
+					with self.assertRaises(ca_trust.FetchRefused):
+						transport("http://cca.gov.in/x", max_bytes=10, timeout=25)
+			self.assertEqual(len(started), ca_trust.MAX_RESOLVER_THREADS)  # the rest were refused without a new thread
+		finally:
+			release.set()
+			for _ in range(100):
+				if ca_trust._RESOLVER_SLOTS.acquire(blocking=False):
+					ca_trust._RESOLVER_SLOTS.release()
+					if all(ca_trust._RESOLVER_SLOTS.acquire(blocking=False) for _ in range(ca_trust.MAX_RESOLVER_THREADS)):
+						for _ in range(ca_trust.MAX_RESOLVER_THREADS):
+							ca_trust._RESOLVER_SLOTS.release()
+						break
+				time.sleep(0.05)
 
 	def test_refusal_carries_a_bounded_network_note_without_urls(self):
 		leaf = MAIN.leaf()

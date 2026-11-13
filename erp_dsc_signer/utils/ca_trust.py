@@ -83,6 +83,7 @@ READ_TIMEOUT = 10.0
 TOTAL_BUDGET = 25.0
 PER_REQUEST_CAP = 8.0  # one source, DNS included, may not use more than this of the total
 RESOLVE_TIMEOUT = 5.0
+MAX_RESOLVER_THREADS = 4  # getaddrinfo cannot be cancelled: at most this many may be stuck at once, then lookups are refused
 # The CCA India CRL/CA-certificate addresses are published as http:// but only https:// answers now. For these
 # hosts (a fixed list, never extra_hosts) a failed http GET is followed by the same path over https on port 443.
 HTTPS_RETRY_HOSTS = frozenset({"cca.gov.in", "www.cca.gov.in"})
@@ -120,6 +121,9 @@ class CertificateNotAuthenticated(Exception):
 
 	def __str__(self):
 		return self.message
+
+
+_RESOLVER_SLOTS = threading.BoundedSemaphore(MAX_RESOLVER_THREADS)
 
 
 class FetchRefused(Exception):
@@ -917,15 +921,23 @@ class HttpTransport:
 	def _lookup(self, host, port, deadline):
 		"""getaddrinfo has no timeout of its own: run it aside and stop waiting when its slice of the budget is gone."""
 		box = []
+		if not _RESOLVER_SLOTS.acquire(blocking=False):
+			raise FetchRefused("resolve")  # earlier lookups are still stuck: refuse rather than pile up threads
 
 		def run():
 			try:
 				box.append(self._resolve(host, port, type=socket.SOCK_STREAM))
 			except BaseException:
 				box.append(None)
+			finally:
+				_RESOLVER_SLOTS.release()
 
 		worker = threading.Thread(target=run, daemon=True)
-		worker.start()
+		try:
+			worker.start()
+		except BaseException:
+			_RESOLVER_SLOTS.release()
+			raise FetchRefused("resolve") from None
 		worker.join(_bounded(RESOLVE_TIMEOUT, deadline))
 		if not box or box[0] is None:
 			raise FetchRefused("resolve")
