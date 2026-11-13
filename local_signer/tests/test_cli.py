@@ -1,5 +1,6 @@
 """cli: signal handling, clean-up, core dumps, config errors, claim printing (spec 001 §3.7, §5)."""
 
+import os
 import contextlib
 import io
 import json
@@ -146,6 +147,7 @@ class TestServeCleanup(SignalHandlersRestored):
 		self.assertTrue(server.closed)
 		self.assertEqual(["serve_forever", "server_close", "dialogs.shutdown"], events)
 
+	@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 	def test_main_disables_core_dumps_before_serving(self):
 		events = []
 		server = StubServer(events)
@@ -299,6 +301,22 @@ class TestCoreDumpHelperIsShared(unittest.TestCase):
 
 		self.assertIs(dialog_child._disable_core_dumps, cli._disable_core_dumps)
 
+
+
+class TestRunAsModule(unittest.TestCase):
+	"""``python -m erp_dsc_local`` must work: the Windows start command in the notes uses it."""
+
+	def test_dash_m_package_runs_the_cli(self):
+		import subprocess
+		import sys
+
+		root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+		done = subprocess.run(
+			[sys.executable, "-m", "erp_dsc_local", "--help"],
+			cwd=root, capture_output=True, text=True, timeout=60, env={**os.environ, "PYTHONPATH": root},
+		)
+		self.assertEqual(0, done.returncode, done.stderr)
+		self.assertIn("--doctor", done.stdout)
 
 if __name__ == "__main__":
 	unittest.main()

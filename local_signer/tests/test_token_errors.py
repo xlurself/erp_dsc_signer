@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -88,7 +89,7 @@ class FakeLib:
 def make_client(lib):
 	client = TokenClient.__new__(TokenClient)
 	client.lib = lib
-	client.module = SimpleNamespace(label="libcastle.dylib", path="/Library/Castle/libcastle.dylib")
+	client.module = SimpleNamespace(label="libcastle.dylib", path=os.path.abspath("/Library/Castle/libcastle.dylib"))
 	client.pk = PK
 	return use_in_process_probe(client)
 

@@ -418,7 +418,7 @@ class RequestTests(unittest.TestCase):
 			return "timeout", None
 
 		client = TokenClient.__new__(TokenClient)
-		client.module = SimpleNamespace(path="/opt/registry/libpkcs11.so", label="libpkcs11.so")
+		client.module = SimpleNamespace(path=os.path.abspath("/opt/registry/libpkcs11.so"), label="libpkcs11.so")
 		with mock.patch.object(token, "_spawn_probe", transport):
 			with self.assertRaises(TokenDriverNotResponding):
 				client.certificates()

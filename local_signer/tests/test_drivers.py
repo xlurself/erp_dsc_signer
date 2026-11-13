@@ -29,6 +29,20 @@ from erp_dsc_local.providers import KNOWN_PATHS, ProviderRegistry
 from erp_dsc_local.token import TokenDriverNotResponding
 
 POSIX = os.name != "nt"
+
+
+def _can_symlink():
+	folder = tempfile.mkdtemp()
+	try:
+		os.symlink(folder, os.path.join(folder, "probe-link"))
+		return True
+	except (OSError, NotImplementedError, AttributeError):
+		return False
+	finally:
+		shutil.rmtree(folder, True)
+
+
+CAN_SYMLINK = _can_symlink()
 INNAIT_MAC = "/opt/Precision_Biometric/InnaITDSC/libraries/libInnaITPKCS11Driver.dylib"
 EPASS_V2_MAC = "/usr/local/lib/libcastle_v2.1.0.0.dylib"
 ORIGINAL_CONFIG = {"host": "127.0.0.1", "port": 17777, "allowed_origins": [], "providers": {"custom_modules": []}}
@@ -45,6 +59,7 @@ class TestKnownPaths(unittest.TestCase):
 		self.assertNotIn("innaitkey", PROVIDER_IDS)
 		self.assertNotIn("innaitkey", providers.PROVIDER_LABELS)
 
+	@unittest.skipUnless(os.name != "nt", "POSIX permission bits, owners and paths; Windows has its own ACL tests")
 	def test_the_registry_offers_innaitkey_through_auto(self):
 		config = load_config(self.write_config())
 		registry = ProviderRegistry(config, system="Darwin", path_exists=lambda path: path == INNAIT_MAC)
@@ -101,6 +116,7 @@ class TestFindDrivers(TempTree):
 	def names(self, result):
 		return sorted(Path(path).name for path in result.candidates)
 
+	@unittest.skipUnless(CAN_SYMLINK, "creating symbolic links needs Administrator or Developer Mode on Windows")
 	def test_matches_by_name_and_extension_within_depth(self):
 		scan = self.build()
 		result = drivers.find_drivers([(str(scan), 4)])
@@ -119,12 +135,14 @@ class TestFindDrivers(TempTree):
 		)
 		self.assertFalse(result.truncated)
 
+	@unittest.skipUnless(CAN_SYMLINK, "creating symbolic links needs Administrator or Developer Mode on Windows")
 	def test_never_follows_a_link_out_of_the_scanned_folder(self):
 		scan = self.build()
 		found = drivers.find_drivers([(str(scan), 6)]).candidates
 		self.assertFalse([path for path in found if "escape" in path])
 		self.assertFalse([path for path in found if "linked-folder" in path])
 
+	@unittest.skipUnless(CAN_SYMLINK, "creating symbolic links needs Administrator or Developer Mode on Windows")
 	def test_entry_and_time_bounds(self):
 		scan = self.build()
 		self.assertTrue(drivers.find_drivers([(str(scan), 4)], max_entries=3).truncated)
@@ -159,6 +177,7 @@ class TestFindDrivers(TempTree):
 		)
 		self.assertIn(("/usr/lib", 2), drivers.scan_roots("Linux", {}))
 
+	@unittest.skipUnless(CAN_SYMLINK, "creating symbolic links needs Administrator or Developer Mode on Windows")
 	def test_cli_prints_candidates_and_marks_known_ones(self):
 		scan = self.build()
 		known = str(scan / "WDPKCS.DLL")
@@ -176,6 +195,7 @@ class TestFindDrivers(TempTree):
 		self.assertIn("nothing was loaded", text.lower())
 
 
+@unittest.skipUnless(os.name != "nt", "POSIX permission bits, owners and paths; Windows has its own ACL tests")
 class AddModuleCase(TempTree):
 	def setUp(self):
 		super().setUp()
@@ -279,6 +299,7 @@ class TestAddModuleRefuses(AddModuleCase):
 		self.assert_refused(self.lib_dir, "not a regular file")
 		self.assert_refused(self.file("vendor/libTestVendorPKCS11.txt"), "library file")
 
+	@unittest.skipUnless(CAN_SYMLINK, "creating symbolic links needs Administrator or Developer Mode on Windows")
 	def test_symlink_is_refused_with_the_real_path(self):
 		link = self.lib_dir / "liblink.dylib"
 		link.symlink_to(self.library)
@@ -341,6 +362,7 @@ class TestAddModuleRefuses(AddModuleCase):
 			with self.subTest(name=name):
 				self.assertTrue(drivers._looks_like_driver(name))
 
+	@unittest.skipUnless(CAN_SYMLINK, "creating symbolic links needs Administrator or Developer Mode on Windows")
 	def test_invalid_or_linked_config_is_never_rewritten(self):
 		self.original = b"{not json"
 		self.config.write_bytes(self.original)

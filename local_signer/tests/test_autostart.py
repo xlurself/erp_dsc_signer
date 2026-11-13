@@ -168,6 +168,7 @@ class AutostartCase(unittest.TestCase):
 		return code, out.getvalue(), err.getvalue()
 
 
+@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 class TestMacInstall(AutostartCase):
 	def test_dry_run_by_default_changes_nothing(self):
 		code, out, _err = self.run_cmd(autostart.install)
@@ -230,6 +231,7 @@ class TestMacInstall(AutostartCase):
 		self.assertEqual([], self.runner.calls)
 
 
+@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 class TestMacUninstall(AutostartCase):
 	def test_dry_run_then_yes_removes_only_our_plist(self):
 		self.run_cmd(autostart.install, yes=True)

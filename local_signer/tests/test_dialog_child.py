@@ -1435,6 +1435,7 @@ class TestChildEndToEnd(unittest.TestCase):
 		self.assertEqual(run.stdout, b"")
 		self.assertLess(run.seconds_after_close, 1.0)
 
+	@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 	def test_core_dumps_are_disabled_before_stdin_is_read(self):
 		run = run_child(make_request(kind="pin"), [("map",), ("escape",)], spy=True)
 		self.assertReply(run, {"v": 1, "kind": "pin", "result": "cancelled"})

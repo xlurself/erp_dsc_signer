@@ -4,6 +4,7 @@ A fake PKCS#11 library records every call (and every handle passed to
 getAttributeValue) so the tests can prove where the PIN went and what was read.
 """
 
+import os
 import ast
 import inspect
 import sys
@@ -272,7 +273,7 @@ def make_client(lib):
 	protocol in-process (``_probe_inproc``); the sign path uses ``lib`` directly."""
 	client = TokenClient.__new__(TokenClient)
 	client.lib, client.pk = lib, PK
-	client.module = SimpleNamespace(label="libwdpkcs.dylib", path="/Library/WD/libwdpkcs.dylib")
+	client.module = SimpleNamespace(label="libwdpkcs.dylib", path=os.path.abspath("/Library/WD/libwdpkcs.dylib"))
 	return use_in_process_probe(client)
 
 

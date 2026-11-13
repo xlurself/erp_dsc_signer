@@ -274,6 +274,7 @@ class TestCliWiring(LogDirCase):
 		for number, handler in self._saved.items():
 			signal.signal(number, handler)
 
+	@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 	def test_main_logs_start_and_stop_and_closes_the_log(self):
 		events = []
 		server = StubServer(events)
@@ -290,6 +291,7 @@ class TestCliWiring(LogDirCase):
 		self.assertIn(" stopped", text)
 		self.assertEqual([], [h for h in logging.getLogger(logs.LOGGER_NAME).handlers if isinstance(h, logs.PrivateRotatingFileHandler)])
 
+	@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 	def test_port_in_use_is_one_line_not_a_traceback(self):
 		events = []
 		server = StubServer(events)
