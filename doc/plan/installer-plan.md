@@ -141,8 +141,10 @@ log is the record, `--doctor` shows config problems); the crash log is rotated a
 junction), then reads every access-allowed entry of the real DACL (GetNamedSecurityInfoW + GetAce through ctypes) and refuses a
 driver, or a folder holding it, on which anyone other than SYSTEM, Administrators, TrustedInstaller or CREATOR OWNER holds write
 rights (an allowlist, so an individual account or a domain group is caught too), and parent folders on which anyone else can
-rename or delete; a permission it cannot read is a refusal (unit-tested with injected rights; the real Windows API call is
-verified on a Windows machine, see section 10); `--install-autostart --yes` /
+rename or delete. The owner of the file or of a folder can always rewrite its permissions, so the owner is counted as holding
+WRITE_DAC and WRITE_OWNER at that level and an ordinary owner is refused. A permission it cannot read is a refusal (unit-tested
+with injected rights; the real Windows API call was run on a Windows 11 machine, see section 10; `RealWindowsAclTest` calls it
+without injection and is skipped off Windows); `--install-autostart --yes` /
 `--uninstall-autostart --yes` refuse root (macOS) and an elevated prompt (Windows); `--find-drivers` reads a folder lazily
 within its bounds; adding an already known or configured driver is exit 0 before the strict file check.
 Remaining residuals: a failing auto-start can still restart every few seconds (only the capped log records it; Task Scheduler

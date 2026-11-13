@@ -647,3 +647,34 @@ class TestPanelRound6(unittest.TestCase):
 			result = drivers.find_drivers([("/x", 1)], max_entries=10)
 		self.assertTrue(result.truncated)
 		self.assertLessEqual(len(pulled), 12)
+
+
+@unittest.skipUnless(os.name == "nt", "calls the real Windows permission APIs; run on Windows")
+class RealWindowsAclTest(unittest.TestCase):
+	"""Exercises windows_allow_aces itself (no injected entries), so breaking the owner request or the SID
+	conversion in drivers.py fails here.  Skipped on macOS/Linux: the Windows test session must run it."""
+
+	def setUp(self):
+		self.folder = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, self.folder, True)
+		self.path = os.path.join(self.folder, "t.dll")
+		Path(self.path).write_bytes(b"x")
+
+	def test_first_entry_is_the_owner_with_rights_to_rewrite_permissions(self):
+		entries = drivers.windows_allow_aces(self.path)
+		self.assertTrue(entries)
+		sid, mask = entries[0]
+		self.assertTrue(sid.startswith("S-1-"))
+		self.assertEqual(mask & (0x40000 | 0x80000), 0x40000 | 0x80000)
+		self.assertTrue(all(m >= 0 for _, m in entries))
+
+	def test_a_user_owned_file_in_the_users_temp_folder_is_refused(self):
+		# The current account owns this file and its folder, and is not SYSTEM/Administrators/TrustedInstaller.
+		with self.assertRaises(drivers.Refused) as caught:
+			drivers._check_windows_acl(self.path)
+		self.assertIn("other users can change", caught.exception.message)
+
+	def test_a_missing_file_is_refused_not_accepted(self):
+		with self.assertRaises(drivers.Refused) as caught:
+			drivers._check_windows_acl(os.path.join(self.folder, "missing.dll"))
+		self.assertIn("could not be checked", caught.exception.message)

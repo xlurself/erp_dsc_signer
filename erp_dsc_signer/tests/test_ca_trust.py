@@ -21,6 +21,8 @@ import re
 import socket
 import traceback
 import types
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -1003,6 +1005,151 @@ class URLPolicyTest(_Base):
 		self.assertLessEqual(inner.calls[0]["timeout"], 25.0)
 		self.assertLessEqual(inner.calls[2]["timeout"], 25.0 - 18.0)
 		self.assertEqual(ca_trust.TOTAL_BUDGET, 25.0)
+
+
+class HttpsTwinTest(_Base):
+	"""CCA India publishes http:// CRL/CA-certificate addresses that no longer answer; https:// does."""
+
+	CRL = "http://cca.gov.in/rw/resources/CCAIndia2022Latest.crl"
+
+	def link(self):
+		leaf = MAIN.leaf()
+		return leaf, MAIN.sub
+
+	def test_twin_is_built_only_for_http_get_urls_on_cca_hosts(self):
+		for url, expected in (
+			(self.CRL, "https://cca.gov.in/rw/resources/CCAIndia2022Latest.crl"),
+			("http://www.cca.gov.in/a/b.cer?x=1", "https://www.cca.gov.in/a/b.cer?x=1"),
+			("http://cca.gov.in:80/a.crl", "https://cca.gov.in/a.crl"),
+			("https://cca.gov.in/a.crl", None),
+			("http://signxca.com/a.crl", None),
+			("http://ocvs.gov.in", None),
+			("http://cca.gov.in:443/a.crl", None),
+			("http://user@cca.gov.in/a.crl", None),
+			("http://evil.example/cca.gov.in/a.crl", None),
+		):
+			with self.subTest(url):
+				self.assertEqual(ca_trust._https_twin(url), expected)
+
+	def test_twin_never_covers_extra_hosts(self):
+		self.assertIsNone(ca_trust._https_twin("http://ca.example.org/a.crl"))
+
+	def test_http_timeout_then_valid_https_crl_gives_good(self):
+		https = self.CRL.replace("http://", "https://", 1)
+		good = crl_bytes(MAIN.root, MAIN.root_key)
+
+		def fetch(url, **kw):
+			if url == https:
+				return good
+			raise TimeoutError()
+
+		network = ca_trust._Network(fetch, ca_trust.DEFAULT_ALLOWED_HOSTS)
+		with mock.patch.object(ca_trust, "_crl_urls", return_value=[self.CRL]):
+			outcome = ca_trust._check_crl(MAIN.sub, MAIN.root, NOW, network)
+		self.assertIsNotNone(outcome)
+		self.assertEqual(outcome[0], "good")
+		self.assertEqual(outcome[1]["responder_host"], "cca.gov.in")
+
+	def test_http_timeout_then_revoked_https_crl_is_revoked(self):
+		https = self.CRL.replace("http://", "https://", 1)
+		bad = crl_bytes(MAIN.root, MAIN.root_key, revoked=[MAIN.sub.serial_number])
+
+		def fetch(url, **kw):
+			if url == https:
+				return bad
+			raise TimeoutError()
+
+		network = ca_trust._Network(fetch, ca_trust.DEFAULT_ALLOWED_HOSTS)
+		with mock.patch.object(ca_trust, "_crl_urls", return_value=[self.CRL]):
+			self.assertEqual(ca_trust._check_crl(MAIN.sub, MAIN.root, NOW, network), ("revoked", None))
+
+	def test_unverifiable_https_answer_is_still_refused(self):
+		# A middlebox that answers the https twin with a CRL signed by the wrong key must not turn failure into success.
+		cert = MAIN.sub
+		network = ca_trust._Network(lambda url, **kw: crl_bytes(MAIN.root, MAIN.root_key, signer_key=_rsa_key()), ca_trust.DEFAULT_ALLOWED_HOSTS)
+		with mock.patch.object(ca_trust, "_crl_urls", return_value=[self.CRL]):
+			outcome = ca_trust._check_crl(cert, MAIN.root, NOW, network)
+		self.assertIsNone(outcome)
+		self.assertIn(("crl", "cca.gov.in", "unusable"), network.failures)
+
+	def test_twin_is_attempted_after_http_failure_and_ocsp_is_not_upgraded(self):
+		calls = []
+
+		def fetch(url, **kw):
+			calls.append((url, kw.get("data") is not None))
+			raise TimeoutError()
+
+		network = ca_trust._Network(fetch, ca_trust.DEFAULT_ALLOWED_HOSTS)
+		with mock.patch.object(ca_trust, "_crl_urls", return_value=[self.CRL]):
+			self.assertIsNone(ca_trust._check_crl(MAIN.sub, MAIN.root, NOW, network))
+		self.assertEqual([u for u, _ in calls], [self.CRL, self.CRL.replace("http://", "https://", 1)])
+		self.assertNotIn(("https://ocvs.gov.in", True), calls)
+		self.assertEqual([f for _, _, f in network.failures], ["timeout", "timeout"])
+
+	def test_a_hostile_twin_target_is_never_fetched(self):
+		called = []
+		network = ca_trust._Network(lambda url, **kw: called.append(url), frozenset({"signxca.com"}))
+		self.assertIsNone(network.get(self.CRL, max_bytes=10, source="crl"))
+		self.assertEqual(called, [])
+		self.assertEqual(network.failures, [("crl", "other", "refused")])
+
+	def test_per_request_cap_and_failure_notes_are_bounded(self):
+		seen = []
+		clock = [1000.0]
+		network = None
+
+		def fetch(url, **kw):
+			seen.append(kw["timeout"])
+			raise ConnectionResetError()
+
+		with mock.patch.object(ca_trust, "_monotonic", side_effect=lambda: clock[0]):
+			network = ca_trust._Network(fetch, ca_trust.DEFAULT_ALLOWED_HOSTS)
+			for _ in range(20):
+				network.get(self.CRL, max_bytes=10, source="crl")
+		self.assertTrue(all(t <= ca_trust.PER_REQUEST_CAP for t in seen))
+		self.assertEqual(len(network.failures), ca_trust.MAX_FAILURE_NOTES)
+		self.assertEqual({f for _, _, f in network.failures}, {"reset"})
+
+	def test_budget_never_resets_across_retries(self):
+		clock = [1000.0]
+
+		def fetch(url, **kw):
+			clock[0] += kw["timeout"]
+			raise TimeoutError()
+
+		with mock.patch.object(ca_trust, "_monotonic", side_effect=lambda: clock[0]):
+			network = ca_trust._Network(fetch, ca_trust.DEFAULT_ALLOWED_HOSTS)
+			for _ in range(6):
+				network.get(self.CRL, max_bytes=10, source="crl")
+		self.assertLessEqual(clock[0] - 1000.0, ca_trust.TOTAL_BUDGET)
+		self.assertIn("budget", [f for _, _, f in network.failures])
+
+	def test_a_stalled_dns_lookup_is_stopped_at_its_slice(self):
+		release = threading.Event()
+
+		def resolver(*a, **kw):
+			release.wait(5)
+			return [(2, 1, 6, "", ("93.184.216.34", 80))]
+
+		transport = ca_trust.HttpTransport(resolver=resolver, connector=lambda *a, **kw: self.fail("must not connect"))
+		started = time.monotonic()
+		with mock.patch.object(ca_trust, "RESOLVE_TIMEOUT", 0.2):
+			with self.assertRaises(ca_trust.FetchRefused):
+				transport("http://cca.gov.in/x", max_bytes=10, timeout=25)
+		release.set()
+		self.assertLess(time.monotonic() - started, 2.0)
+
+	def test_refusal_carries_a_bounded_network_note_without_urls(self):
+		leaf = MAIN.leaf()
+		net = world(MAIN, leaf, with_ocsp=False)
+		for url in [u for u in net.routes if not u.endswith(".cer")]:
+			del net.routes[url]  # certificates still answer; every CRL is gone
+		exc = self.assertRefused("REVOCATION_UNAVAILABLE", leaf, net)
+		self.assertTrue(exc.detail)
+		for source, host, failure in exc.detail:
+			self.assertIn(source, {"aia", "ocsp", "crl"})
+			self.assertTrue(host in ca_trust.DEFAULT_ALLOWED_HOSTS or host == "other")
+			self.assertIn(failure, {"refused", "budget", "size", "timeout", "reset", "network", "error", "unusable"})
 
 
 class _SegmentedSocket:
@@ -2085,7 +2232,7 @@ class KeyRolloverTest(_Base):
 		chain, keys = self.rollover(x_signer_key=_test_pki.rsa_key())
 		self.assertFalse(ca_trust._directly_issued(chain[2], chain[3]))
 		net = self.assertChainRefused("CHAIN_INCOMPLETE", chain, keys)  # X's AIA serves the root, which did not sign X
-		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"], RO["root_cer"]])
+		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"], RO["root_cer"], RO["root_cer"].replace("http://", "https://", 1)])  # the CCA https twin follows an unusable http answer
 		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:  # the builder alone refuses the link
 			ca_trust._build_path(chain[0], (chain[-1],), ca_trust._Network(self.world(chain, keys), ca_trust.DEFAULT_ALLOWED_HOSTS))
 		self.assertEqual(cm.exception.reason_code, "CHAIN_INCOMPLETE")
@@ -2198,7 +2345,7 @@ class KeyRolloverTest(_Base):
 		chain, keys = self.rollover()
 		chain[2] = x
 		net = self.assertChainRefused("CHAIN_INCOMPLETE", chain, keys)
-		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"], RO["root_cer"]])
+		self.assertEqual(net.urls(), [RO["s_cer"], RO["x_cer"], RO["root_cer"], RO["root_cer"].replace("http://", "https://", 1)])  # the CCA https twin follows an unusable http answer
 		with self.assertRaises(ca_trust.CertificateNotAuthenticated) as cm:
 			ca_trust._validate_path(chain, (c.root,), NOW)
 		self.assertEqual(cm.exception.reason_code, "NOT_CCA_TRUSTED")
@@ -2288,7 +2435,7 @@ class RealCCAChainTest(_Base):
 		# are queried through the URL policy, and the link is refused as unconfirmed.
 		links = (
 			(self.sub, self.ca, [self.SUB_OCSP, self.SUB_CRL]),
-			(self.ca, self.root, [self.CA_OCSP, self.CA_CRL]),
+			(self.ca, self.root, [self.CA_OCSP, self.CA_CRL, self.CA_CRL.replace("http://", "https://", 1)]),
 		)
 		for cert, issuer, expected in links:
 			with self.subTest(sha(cert)):

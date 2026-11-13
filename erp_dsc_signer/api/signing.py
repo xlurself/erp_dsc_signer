@@ -383,12 +383,14 @@ def _authenticate_or_throw(der):
 		record = _verification_record(ca_trust.authenticate_certificate(der, now=_utc_now()))
 	except ca_trust.CertificateNotAuthenticated as exc:
 		code = exc.reason_code if exc.reason_code in ca_trust.MESSAGES else None
+		detail = tuple(exc.detail)
 	except Exception:
 		code = None  # fail closed; the exception text is deliberately dropped
+		detail = ()
 	else:
 		return record
 	# Raised outside the except blocks so no library exception is kept as context.
-	_log_refusal(code or "UNEXPECTED_ERROR", sha256_hex(der))
+	_log_refusal(code or "UNEXPECTED_ERROR", sha256_hex(der), detail)
 	message = ca_trust.MESSAGES[code] if code else CERTIFICATE_NOT_AUTHENTICATED_MESSAGE
 	frappe.throw(_(message), title=_("DSC certificate not authenticated"))
 
@@ -408,12 +410,13 @@ def _text(value):
 	return None if value is None or isinstance(value, (list, dict)) else str(value)
 
 
-def _log_refusal(reason_code, certificate_sha256):
-	"""The only refusal log (spec s5): reason code + public certificate fingerprint, nothing else."""
-	frappe.log_error(
-		title="DSC certificate not authenticated",
-		message=json.dumps({"reason_code": reason_code, "certificate_sha256": certificate_sha256}, sort_keys=True),
-	)
+def _log_refusal(reason_code, certificate_sha256, detail=()):
+	"""The only refusal log (spec s5): reason code + public certificate fingerprint, plus for a failed network
+	step a bounded list of (source, host, failure class) from a fixed vocabulary: never a URL, body or text."""
+	record = {"reason_code": reason_code, "certificate_sha256": certificate_sha256}
+	if detail:
+		record["network"] = [{"source": s, "host": h, "failure": f} for s, h, f in list(detail)[:8]]
+	frappe.log_error(title="DSC certificate not authenticated", message=json.dumps(record, sort_keys=True))
 	# frappe/app.py rolls back a POST that raised, which would drop this row. Every caller reaches here
 	# before anything is written (no attach yet), so the commit keeps only the log row.
 	frappe.db.commit()

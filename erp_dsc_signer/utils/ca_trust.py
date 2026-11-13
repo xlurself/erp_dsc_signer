@@ -26,6 +26,7 @@ import ipaddress
 import re
 import socket
 import ssl
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -80,6 +81,12 @@ MAX_CRL_BYTES = 8 * 1024 * 1024
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 10.0
 TOTAL_BUDGET = 25.0
+PER_REQUEST_CAP = 8.0  # one source, DNS included, may not use more than this of the total
+RESOLVE_TIMEOUT = 5.0
+# The CCA India CRL/CA-certificate addresses are published as http:// but only https:// answers now. For these
+# hosts (a fixed list, never extra_hosts) a failed http GET is followed by the same path over https on port 443.
+HTTPS_RETRY_HOSTS = frozenset({"cca.gov.in", "www.cca.gov.in"})
+MAX_FAILURE_NOTES = 8
 CLOCK_SKEW = timedelta(minutes=5)
 MAX_INTERMEDIATES = 4
 MAX_URLS_PER_KIND = 3
@@ -108,6 +115,7 @@ class CertificateNotAuthenticated(Exception):
 			raise ValueError("unknown reason code")
 		self.reason_code = reason_code
 		self.message = MESSAGES[reason_code]
+		self.detail = ()  # bounded (source, host, failure) notes for the refusal log; never URLs or text
 		super().__init__(reason_code, self.message)
 
 	def __str__(self):
@@ -146,7 +154,9 @@ def authenticate_certificate(cert_der, *, now, fetch=None, roots=None, extra_hos
 	except Exception:
 		code = stage[0]  # unexpected failure: refuse with the reason of the step that was running
 	# Raised outside the except blocks so no library exception is kept as context or cause.
-	raise CertificateNotAuthenticated(code) from None
+	refusal = CertificateNotAuthenticated(code)
+	refusal.detail = tuple(net.failures)
+	raise refusal from None
 
 
 def _authenticate(cert_der, now, anchors, net, stage):
@@ -266,12 +276,13 @@ def _fetch_issuer(cert, net):
 	if not urls:
 		raise CertificateNotAuthenticated("CHAIN_INCOMPLETE")
 	mismatched = False
-	for url in urls:
-		body = net.get(url, max_bytes=MAX_CERT_BYTES)
+	for url in _with_https_twins(urls):
+		body = net.get(url, max_bytes=MAX_CERT_BYTES, source="aia")
 		if body is None:
 			continue
 		candidate = _parse_fetched_certificate(body)
 		if candidate is None:
+			net.note("aia", url, "unusable")
 			continue
 		if _directly_issued(cert, candidate):
 			return candidate
@@ -471,11 +482,12 @@ def _check_ocsp(cert, issuer, now, net):
 	except Exception:
 		return None
 	for url in urls:
-		raw = net.get(url, max_bytes=MAX_OCSP_BYTES, data=body, content_type="application/ocsp-request")
+		raw = net.get(url, max_bytes=MAX_OCSP_BYTES, data=body, content_type="application/ocsp-request", source="ocsp")
 		if raw is None:
 			continue
 		outcome = _evaluate_ocsp(raw, cert, issuer, now)
 		if outcome is None:
+			net.note("ocsp", url, "unusable")
 			continue
 		status, produced_at = outcome
 		if status == "revoked":
@@ -564,12 +576,13 @@ def _signature_valid(public_key, signature, data, hash_algorithm):
 
 def _check_crl(cert, issuer, now, net):
 	"""("good", entry) | ("revoked", None) | None when no verified CRL was obtained."""
-	for url in _crl_urls(cert):
-		raw = net.get(url, max_bytes=MAX_CRL_BYTES)
+	for url in _with_https_twins(_crl_urls(cert)):
+		raw = net.get(url, max_bytes=MAX_CRL_BYTES, source="crl")
 		if raw is None:
 			continue
 		outcome = _evaluate_crl(raw, cert, issuer, now)
 		if outcome is None:
+			net.note("crl", url, "unusable")
 			continue
 		status, this_update = outcome
 		if status == "revoked":
@@ -656,6 +669,31 @@ def _aia_urls(cert, method):
 		and isinstance(description.access_location, x509.UniformResourceIdentifier)
 	]
 	return urls[:MAX_URLS_PER_KIND]
+
+
+def _https_twin(url):
+	"""The same host, path and query over https on port 443, for an http GET URL on a CCA host; else None."""
+	try:
+		parts = urlsplit(url)
+		port = parts.port
+	except ValueError:
+		return None
+	if parts.scheme != "http" or parts.hostname not in HTTPS_RETRY_HOSTS or port not in (None, 80):
+		return None
+	if "@" in parts.netloc or parts.username is not None or parts.password is not None:
+		return None
+	return parts._replace(scheme="https", netloc=parts.hostname).geturl()
+
+
+def _with_https_twins(urls):
+	"""Each http URL on a CCA host is followed by its https twin; the caller still verifies whatever it gets."""
+	out = []
+	for url in urls:
+		out.append(url)
+		twin = _https_twin(url)
+		if twin is not None and twin not in urls and twin not in out:
+			out.append(twin)
+	return out
 
 
 def _crl_urls(cert):
@@ -777,21 +815,50 @@ class _Network:
 		self._fetch = fetch
 		self._allowed = allowed_hosts
 		self._deadline = _monotonic() + TOTAL_BUDGET
+		self.failures = []
 
-	def get(self, url, *, max_bytes, data=None, content_type=None):
+	def note(self, source, url, failure):
+		"""Remember (source, host, failure class) for the refusal log: a fixed vocabulary, never the URL or any text."""
+		if len(self.failures) >= MAX_FAILURE_NOTES:
+			return
+		try:
+			host = urlsplit(url).hostname or ""
+		except ValueError:
+			host = ""
+		self.failures.append((source, host if host in self._allowed else "other", failure))
+
+	def get(self, url, *, max_bytes, data=None, content_type=None, source="fetch"):
 		"""The response body, or None when the URL is refused, the budget is spent or the fetch failed."""
 		if not url_allowed(url, self._allowed):
+			self.note(source, url, "refused")
 			return None
 		remaining = self._deadline - _monotonic()
 		if remaining <= 0:
+			self.note(source, url, "budget")
 			return None
 		try:
-			body = self._fetch(url, data=data, content_type=content_type, max_bytes=max_bytes, timeout=remaining)
-		except Exception:
+			body = self._fetch(
+				url, data=data, content_type=content_type, max_bytes=max_bytes, timeout=min(PER_REQUEST_CAP, remaining)
+			)
+		except Exception as exc:
+			self.note(source, url, _failure_class(exc))
 			return None
 		if not isinstance(body, (bytes, bytearray)) or len(body) > max_bytes:
+			self.note(source, url, "size")
 			return None
 		return bytes(body)
+
+
+def _failure_class(exc):
+	if isinstance(exc, TimeoutError):
+		return "timeout"
+	if isinstance(exc, ConnectionResetError):
+		return "reset"
+	if isinstance(exc, (ConnectionRefusedError, FetchRefused)):
+		return "refused"
+	if isinstance(exc, OSError):
+		return "network"
+	return "error"
 
 
 class HttpTransport:
@@ -821,7 +888,7 @@ class HttpTransport:
 		if port not in (80, 443):
 			raise FetchRefused("port")
 		host = parts.hostname
-		address = self._public_address(host, port)
+		address = self._public_address(host, port, deadline)
 		sock = self._connect((address, port), timeout=_bounded(CONNECT_TIMEOUT, deadline))
 		conn = None
 		try:
@@ -847,9 +914,26 @@ class HttpTransport:
 				conn.close()
 			sock.close()
 
-	def _public_address(self, host, port):
+	def _lookup(self, host, port, deadline):
+		"""getaddrinfo has no timeout of its own: run it aside and stop waiting when its slice of the budget is gone."""
+		box = []
+
+		def run():
+			try:
+				box.append(self._resolve(host, port, type=socket.SOCK_STREAM))
+			except BaseException:
+				box.append(None)
+
+		worker = threading.Thread(target=run, daemon=True)
+		worker.start()
+		worker.join(_bounded(RESOLVE_TIMEOUT, deadline))
+		if not box or box[0] is None:
+			raise FetchRefused("resolve")
+		return box[0]
+
+	def _public_address(self, host, port, deadline):
 		try:
-			infos = self._resolve(host, port, type=socket.SOCK_STREAM)
+			infos = self._lookup(host, port, deadline)
 		except (OSError, UnicodeError):
 			raise FetchRefused("resolve") from None
 		chosen = None
