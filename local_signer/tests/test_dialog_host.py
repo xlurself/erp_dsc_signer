@@ -64,6 +64,14 @@ def patch_timing(test, *, startup=5.0, grace=0.3, kill_delay=0.5):
 		test.addCleanup(patcher.stop)
 
 
+def assert_killed(test, returncode, msg=None):
+	"""A child ended by us: a negative signal code on POSIX; Windows reports a plain non-zero code."""
+	if os.name == "nt":
+		test.assertNotEqual(0, returncode, msg)
+	else:
+		test.assertLess(returncode, 0, msg)
+
+
 class PopenRecorder:
 	"""Stands in for subprocess.Popen: records each call, then runs the real one."""
 
@@ -265,7 +273,7 @@ class TestSpawnContract(HostCase):
 		real = dialog_child.encode_request
 		with mock.patch.object(dialog_child, "encode_request", lambda r: real(r)[:-1]):
 			self.assertEqual("dialog_timeout", self.cause_of(request("MODE:result:cancelled")))
-		self.assertLess(self.popen.procs[0].returncode, 0, "killed and reaped at the deadline")
+		assert_killed(self, self.popen.procs[0].returncode, "killed and reaped at the deadline")
 
 	def test_missing_script_is_spawn_failed_without_popen(self):
 		host = ui.DialogHost(child_script=TESTS_DIR / "no_such_child.py")
@@ -327,7 +335,7 @@ class TestValidReplies(HostCase):
 		elapsed = time.monotonic() - start
 		self.assertEqual(SENTINEL, reply["value"])
 		self.assertLess(elapsed, 3.0, "the PIN must not be held until the deadline")
-		self.assertLess(self.popen.procs[0].returncode, 0, "killed after the grace period")
+		assert_killed(self, self.popen.procs[0].returncode, "killed after the grace period")
 
 
 class TestClassifierRows(HostCase):
@@ -386,8 +394,9 @@ class TestClassifierRows(HostCase):
 		start = time.monotonic()
 		self.assertCause("dialog_timeout", "MODE:hang")
 		self.assertGreaterEqual(time.monotonic() - start, 1.0)
-		self.assertLess(self.popen.procs[0].returncode, 0, "the child was killed and reaped")
+		assert_killed(self, self.popen.procs[0].returncode, "the child was killed and reaped")
 
+	@unittest.skipIf(os.name == "nt", "Windows terminate() is a hard kill; no ignored-SIGTERM stage to test")
 	def test_deadline_escalates_to_kill_when_terminate_is_ignored(self):
 		patch_timing(self, startup=0.8, grace=0.2, kill_delay=0.4)
 		start = time.monotonic()
@@ -400,7 +409,7 @@ class TestClassifierRows(HostCase):
 		start = time.monotonic()
 		self.assertCause("dialog_bad_reply", "MODE:oversize:" + SENTINEL)
 		self.assertLess(time.monotonic() - start, 3.0, "killed on the extra byte, not at the deadline")
-		self.assertLess(self.popen.procs[0].returncode, 0)
+		assert_killed(self, self.popen.procs[0].returncode)
 		self.assertCause("dialog_bad_reply", "MODE:oversize_line")
 
 	def test_bad_line_then_linger_is_bad_reply_after_grace(self):
@@ -592,6 +601,7 @@ class TestShutdown(HostCase):
 		self.assertFalse(thread.is_alive(), "the dialog thread deadlocked")
 		self.assertEqual("dialog_shutdown", box["error"].cause)
 
+	@unittest.skipIf(os.name == "nt", "Windows terminate() is a hard kill; no ignored-SIGTERM stage to test")
 	def test_kill_reason_is_set_once_first_wins(self):
 		child = ui._Child(_Proc(None), 0.0, None)
 		for reason in ("deadline", "oversize", "shutdown"):
