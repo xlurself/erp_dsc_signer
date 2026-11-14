@@ -166,6 +166,14 @@ class TestOutcomes(DoctorCase):
 		_code, text = self.report({MODULE_A: missing, MODULE_B: missing})
 		self.assertIn("PyKCS11 is not installed", text)
 
+	def test_an_installed_but_unloadable_pykcs11_is_named_not_called_missing(self):
+		broken = LocalSignerError("DEPENDENCY_MISSING", "Install PyKCS11 to use a USB DSC token.", status=503)
+		broken.__cause__ = ImportError("DLL load failed: secret-path-text " + MARK)
+		_code, text = self.report({MODULE_A: broken, MODULE_B: broken})
+		self.assertIn("PyKCS11 is installed but failed to import (ImportError)", text)
+		self.assertNotIn("is not installed", text)
+		self.assertNotIn(MARK, text)  # the import message is never printed, only its class
+
 	def test_a_wrong_bitness_driver_is_tagged_and_never_probed(self):
 		with mock.patch("erp_dsc_local.drivers.unusable_reason", side_effect=lambda p: "32-bit driver; this Python is 64-bit and cannot use it" if p == MODULE_B else None):
 			code, text = self.report({MODULE_A: TokenUnavailable(), MODULE_B: AssertionError("probed a 32-bit driver")})

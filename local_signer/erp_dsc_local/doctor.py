@@ -129,6 +129,10 @@ def _token_check(module, client_factory) -> list:
 		return [head + "the token cannot be read: " + printable(exc.message, 240)]
 	except LocalSignerError as exc:
 		if exc.code == "DEPENDENCY_MISSING":
+			cause = exc.__cause__
+			if isinstance(cause, ImportError) and not isinstance(cause, ModuleNotFoundError):
+				# Installed, but it would not load (for example a wheel built for another Python).
+				return [head + f"PyKCS11 is installed but failed to import ({exception_name(type(cause))}); reinstall it for this Python"]
 			return [head + "PyKCS11 is not installed, so tokens cannot be read"]
 		return [head + "the token cannot be read: " + printable(exc.message, 240)]
 	except Exception as exc:
