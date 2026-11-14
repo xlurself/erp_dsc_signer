@@ -282,7 +282,6 @@ class TestCliWiring(LogDirCase):
 		for number, handler in self._saved.items():
 			signal.signal(number, handler)
 
-	@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 	def test_main_logs_start_and_stop_and_closes_the_log(self):
 		events = []
 		server = StubServer(events)
@@ -292,14 +291,13 @@ class TestCliWiring(LogDirCase):
 		fake.VERSION = "9.9.9-test"
 		with mock.patch.dict(sys.modules, {"erp_dsc_local.service": fake}), mock.patch.object(
 			sys, "argv", ["erp-dsc-local", "--config", str(self.config)]
-		), mock.patch("resource.setrlimit"):
+		), mock.patch.object(cli, "_disable_core_dumps"):
 			cli.main()
 		text = self.log_text()
 		self.assertIn("started: ERP DSC Signer 9.9.9-test on 127.0.0.1:17777", text)
 		self.assertIn(" stopped", text)
 		self.assertEqual([], [h for h in logging.getLogger(logs.LOGGER_NAME).handlers if isinstance(h, logs.PrivateRotatingFileHandler)])
 
-	@unittest.skipUnless(os.name != "nt", "POSIX-only: uses the resource module, POSIX paths or permission bits")
 	def test_port_in_use_is_one_line_not_a_traceback(self):
 		events = []
 		server = StubServer(events)
@@ -314,7 +312,7 @@ class TestCliWiring(LogDirCase):
 		err = io.StringIO()
 		with mock.patch.dict(sys.modules, {"erp_dsc_local.service": fake}), mock.patch.object(
 			sys, "argv", ["erp-dsc-local", "--config", str(self.config)]
-		), mock.patch("resource.setrlimit"), contextlib.redirect_stderr(err):
+		), mock.patch.object(cli, "_disable_core_dumps"), contextlib.redirect_stderr(err):
 			with self.assertRaises(SystemExit) as raised:
 				cli.main()
 		self.assertEqual(1, raised.exception.code)

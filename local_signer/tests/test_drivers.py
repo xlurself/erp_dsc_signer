@@ -59,7 +59,6 @@ class TestKnownPaths(unittest.TestCase):
 		self.assertNotIn("innaitkey", PROVIDER_IDS)
 		self.assertNotIn("innaitkey", providers.PROVIDER_LABELS)
 
-	@unittest.skipUnless(os.name != "nt", "POSIX permission bits, owners and paths; Windows has its own ACL tests")
 	def test_the_registry_offers_innaitkey_through_auto(self):
 		config = load_config(self.write_config())
 		registry = ProviderRegistry(config, system="Darwin", path_exists=lambda path: path == INNAIT_MAC)
@@ -195,7 +194,6 @@ class TestFindDrivers(TempTree):
 		self.assertIn("nothing was loaded", text.lower())
 
 
-@unittest.skipUnless(os.name != "nt", "POSIX permission bits, owners and paths; Windows has its own ACL tests")
 class AddModuleCase(TempTree):
 	def setUp(self):
 		super().setUp()
@@ -209,6 +207,13 @@ class AddModuleCase(TempTree):
 		self.lib_dir.mkdir()
 		os.chmod(self.lib_dir, 0o755)
 		self.library = self.file("vendor/libTestVendorPKCS11.dylib", mode=0o755)
+		if os.name == "nt":
+			# These cases run add_module under system="Darwin", whose owner/mode check needs
+			# os.getuid; that check is POSIX-only and has its own tests.  Everything else in
+			# add_module (path rules, config writing, nothing loaded) still runs here.
+			patcher = mock.patch.object(drivers, "_check_not_replaceable")
+			patcher.start()
+			self.addCleanup(patcher.stop)
 		# A library loaded in THIS process is the failure this command exists to avoid.
 		targets = [(ctypes, "CDLL"), (ctypes.cdll, "LoadLibrary")]
 		try:

@@ -1,14 +1,6 @@
 """Spec 001 §7: the per-serial token lock, and the flags re-read immediately before C_Login.
 
 The real ``SignerService.sign`` drives a real ``TokenClient`` over the fake PKCS#11 library
-import os as _os
-import sys as _sys
-
-# Sibling test modules are imported by bare name; make that work when this module is
-# loaded by its full name from the repository root as well as by discovery.
-if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
-	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-
 from test_token_login, so the lock, the guard and token.py's re-read are production code;
 only the token, the PIN dialog and endesive are fakes.
 
@@ -19,12 +11,19 @@ locked it.
 """
 
 import json
+import os as _os
+import sys as _sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 import test_token_login as fakes
 from test_token_login import PK, SENTINEL_PIN, assert_no_sentinel_in_frames, make_client, raised, two_slot_lib
