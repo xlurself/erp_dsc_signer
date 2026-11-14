@@ -35,8 +35,8 @@ from erp_dsc_local.errors import DialogFailed, PinCancelled, PinPromptUnavailabl
 
 try:
 	from _frames import ReadintoOnly, assert_no_sentinel_in_frames, assert_no_sentinel_on_heap, heap_hits, raised, sentinel_hits
-except ImportError:  # run as tests.test_pin_retention
-	from tests._frames import (
+except ImportError:  # run as tests.test_pin_retention or local_signer.tests.test_pin_retention
+	from ._frames import (
 		ReadintoOnly,
 		assert_no_sentinel_in_frames,
 		assert_no_sentinel_on_heap,
@@ -105,7 +105,9 @@ CHILD_SCRIPT = textwrap.dedent(
 # mode -> (expected outcome, did the PIN bytes reach the buffer?)
 FAILURES = {
 	"entered_exit3": ("dialog_process_failed", True),
-	"entered_crash": ("dialog_process_crashed", True),
+	# Windows reports a killed process as a positive exit code (TerminateProcess), so the
+	# sign-based classifier can only call it "failed" there; the PIN is wiped either way.
+	"entered_crash": ("dialog_process_failed" if os.name == "nt" else "dialog_process_crashed", True),
 	"partial_hang": ("dialog_timeout", True),
 	"oversize": ("dialog_bad_reply", True),
 	"extra_line": ("dialog_bad_reply", True),
