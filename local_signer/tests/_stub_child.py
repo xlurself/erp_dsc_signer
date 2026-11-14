@@ -38,7 +38,26 @@ def hang() -> None:
 		time.sleep(1)
 
 
+def _windows_stdin_state() -> str:
+	# select() only works on sockets on Windows: read one byte on a helper thread instead.
+	import threading
+
+	got = []
+
+	def read_one():
+		got.append(os.read(0, 1))
+
+	thread = threading.Thread(target=read_one, daemon=True)
+	thread.start()
+	thread.join(0.3)
+	if not got:
+		return "open"
+	return "eof" if got[0] == b"" else "extra"
+
+
 def stdin_state() -> str:
+	if os.name == "nt":
+		return _windows_stdin_state()
 	readable, _w, _x = select.select([0], [], [], 0.3)
 	if not readable:
 		return "open"

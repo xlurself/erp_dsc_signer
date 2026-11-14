@@ -43,7 +43,7 @@ from erp_dsc_local.token import DRIVER_NOT_RESPONDING, TokenClient, TokenDriverN
 import test_service_http as http_tests
 
 MARKER = "CHILD-TEXT-MARKER-93ad"
-MODULE_PATH = "/Library/Vendor/libvendor.dylib"
+MODULE_PATH = os.path.abspath("/Library/Vendor/libvendor.dylib")
 PROBE_FILE = str(Path(token_probe.__file__).resolve())
 POSIX = os.name != "nt"
 

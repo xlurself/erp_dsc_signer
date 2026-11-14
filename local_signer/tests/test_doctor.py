@@ -26,6 +26,7 @@ from erp_dsc_local import doctor, token
 from erp_dsc_local.errors import CertificatesHidden, LocalSignerError, TokenUnavailable
 from erp_dsc_local.token import TokenClient, TokenDriverNotResponding
 import os as _os
+import re
 import sys as _sys
 
 # Sibling test modules are imported by bare name; make that work when this module is
@@ -175,8 +176,8 @@ class TestOutcomes(DoctorCase):
 	def test_missing_modules_are_listed_but_never_asked(self):
 		code, text = self.report({MODULE_A: TokenUnavailable()}, existing=(MODULE_A,))
 		self.assertEqual(0, code)
-		self.assertRegex(text, r"missing\s+Generic PKCS#11\s+" + MODULE_B)
-		self.assertRegex(text, r"found\s+Generic PKCS#11\s+" + MODULE_A)
+		self.assertRegex(text, r"missing\s+Generic PKCS#11\s+" + re.escape(MODULE_B))
+		self.assertRegex(text, r"found\s+Generic PKCS#11\s+" + re.escape(MODULE_A))
 		self.assertEqual(["certificates"], self.calls)
 
 	def test_bad_config_is_reported_and_the_rest_still_runs(self):
@@ -185,7 +186,7 @@ class TestOutcomes(DoctorCase):
 		self.assertEqual(0, code)
 		self.assertIn("cannot be used: Unable to read a valid JSON configuration file.", text)
 		self.assertIn("Helper version:", text)
-		self.assertIn("/usr/local/lib/libwdpkcs.dylib", text)  # built-in locations still listed
+		self.assertIn("/usr/local/lib/libwdpkcs.dylib", text.replace("\\", "/"))  # built-in locations still listed
 
 	def test_output_is_plain_text_under_200_lines(self):
 		modules = [(_os.path.abspath(f"/opt/erp-dsc-test/lib{n}-pkcs11.dylib"), f"test-{n}") for n in range(60)]
