@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import traceback
 import unittest
 from pathlib import Path
@@ -382,7 +383,7 @@ class TestConsentWithRealHost(unittest.TestCase):
 	def test_crash_is_unavailable_not_deny(self):
 		with self.assertRaises(PairPromptUnavailable) as ctx:
 			self.run_mode("MODE:crash")
-		self.assertEqual({"cause": "dialog_process_crashed"}, ctx.exception.details)
+		self.assertEqual({"cause": "dialog_process_failed" if os.name == "nt" else "dialog_process_crashed"}, ctx.exception.details)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,14 @@ from types import SimpleNamespace
 from unittest import mock
 
 import erp_dsc_local
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from _probe_inproc import use_in_process_probe
 from erp_dsc_local.errors import LocalSignerError, PinIncorrect, PinLocked, PinRateLimited, TokenBusy, TokenUnavailable
 from erp_dsc_local.token import (

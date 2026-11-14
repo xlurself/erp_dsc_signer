@@ -16,6 +16,14 @@ from unittest import mock
 
 import PyKCS11 as REAL_PYKCS11
 
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 import test_token_login as fakes
 from test_endesive_integration import RealEndesiveCase, _minimal_pdf, _server_signature_meta
 from test_token_login import PK, SENTINEL_PIN, FakeCms, FakeGuard, chain, install_fake_endesive, make_client, two_slot_lib

@@ -26,6 +26,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from _probe_inproc import in_process_transport
 from erp_dsc_local import service as service_module
 from erp_dsc_local import token, token_probe
@@ -422,7 +430,7 @@ class RequestTests(unittest.TestCase):
 		with mock.patch.object(token, "_spawn_probe", transport):
 			with self.assertRaises(TokenDriverNotResponding):
 				client.certificates()
-		self.assertEqual("/opt/registry/libpkcs11.so", captured[0]["module_path"])
+		self.assertEqual(os.path.abspath("/opt/registry/libpkcs11.so"), captured[0]["module_path"])
 
 
 class NoVendorLibraryInDaemonTests(unittest.TestCase):

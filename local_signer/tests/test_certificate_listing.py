@@ -27,6 +27,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 import test_service_http as http_tests
 from erp_dsc_local import service as service_module
 from erp_dsc_local.certificates import TokenCertificate, is_signing_certificate, parse_token_certificate
@@ -38,12 +46,12 @@ from erp_dsc_local.token import TokenDriverNotResponding
 from test_signature_meta import server_meta
 
 
-WD = CustomModule("test-wd", "watchdata", "/opt/erp-dsc-test/libwatchdata-test.dylib", "Test WatchData module")
-INNAIT = CustomModule("test-innait", "generic_pkcs11", "/opt/erp-dsc-test/libinnait-test.dylib", "Test InnaitKey module")
-WD2 = CustomModule("test-wd-2", "watchdata", "/opt/erp-dsc-test/libwatchdata-2-test.dylib", "Second WatchData module")
-MISSING = CustomModule("test-missing", "generic_pkcs11", "/opt/erp-dsc-test/not-installed.dylib", "Not installed")
+WD = CustomModule("test-wd", "watchdata", _os.path.abspath("/opt/erp-dsc-test/libwatchdata-test.dylib"), "Test WatchData module")
+INNAIT = CustomModule("test-innait", "generic_pkcs11", _os.path.abspath("/opt/erp-dsc-test/libinnait-test.dylib"), "Test InnaitKey module")
+WD2 = CustomModule("test-wd-2", "watchdata", _os.path.abspath("/opt/erp-dsc-test/libwatchdata-2-test.dylib"), "Second WatchData module")
+MISSING = CustomModule("test-missing", "generic_pkcs11", _os.path.abspath("/opt/erp-dsc-test/not-installed.dylib"), "Not installed")
 NO_TOKEN = "No compatible USB DSC token is connected."
-DRIVER_TEXT = "CKR_GENERAL_ERROR /opt/erp-dsc-test/libinnait-test.dylib vendor said: slot 0 fell over"
+DRIVER_TEXT = f"CKR_GENERAL_ERROR {INNAIT.path} vendor said: slot 0 fell over"
 START = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
 
 

@@ -621,6 +621,7 @@ class TestPanelRound6(unittest.TestCase):
 			drivers._check_windows_acl(r"C:\Windows\System32\x.dll", boom)
 		self.assertIn("could not be checked", ctx.exception.message)
 
+	@unittest.skipIf(os.name == "nt", "POSIX ownership and mode checks (os.getuid); Darwin path rules")
 	def test_a_known_path_is_success_even_when_the_strict_check_would_refuse(self):
 		root = Path(tempfile.mkdtemp(prefix="erp-dsc-known-"))
 		self.addCleanup(shutil.rmtree, root, True)

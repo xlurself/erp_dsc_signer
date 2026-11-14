@@ -25,13 +25,21 @@ from unittest import mock
 from erp_dsc_local import doctor, token
 from erp_dsc_local.errors import CertificatesHidden, LocalSignerError, TokenUnavailable
 from erp_dsc_local.token import TokenClient, TokenDriverNotResponding
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from test_certificate_listing import _der, _real_token_five, _token_cert
 
 MARK = "D0CT0R-SENT1NEL"
 CONFIG_ORIGIN = "https://config-" + MARK.lower() + ".example.invalid"
 PAIRED_ORIGIN = "https://paired-" + MARK.lower() + ".example.invalid"
-MODULE_A = "/opt/erp-dsc-test/libtest-a-pkcs11.dylib"
-MODULE_B = "/opt/erp-dsc-test/libtest-b-pkcs11.dylib"
+MODULE_A = _os.path.abspath("/opt/erp-dsc-test/libtest-a-pkcs11.dylib")
+MODULE_B = _os.path.abspath("/opt/erp-dsc-test/libtest-b-pkcs11.dylib")
 try:
 	import PyKCS11  # noqa: F401
 
@@ -180,7 +188,7 @@ class TestOutcomes(DoctorCase):
 		self.assertIn("/usr/local/lib/libwdpkcs.dylib", text)  # built-in locations still listed
 
 	def test_output_is_plain_text_under_200_lines(self):
-		modules = [(f"/opt/erp-dsc-test/lib{n}-pkcs11.dylib", f"test-{n}") for n in range(60)]
+		modules = [(_os.path.abspath(f"/opt/erp-dsc-test/lib{n}-pkcs11.dylib"), f"test-{n}") for n in range(60)]
 		self.write_config(modules=modules)
 		many = _real_token_five() * 4
 		code, text = self.report({path: many for path, _ in modules}, existing=[path for path, _ in modules])

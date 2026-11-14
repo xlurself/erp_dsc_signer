@@ -38,6 +38,14 @@ from erp_dsc_local.pin import request_pin
 from erp_dsc_local.service import HANDLER_ERROR_LINE, SignerService
 from erp_dsc_local.trust import TrustStore
 from erp_dsc_local.ui import DialogHost
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from test_signature_meta import server_meta  # the full meta the ERP sends
 
 
@@ -315,7 +323,7 @@ class TestSweep(LeakSweepCase):
 
 	def test_crash(self):
 		self.use_child("crash")
-		self.assert_cause(self.sign(), 503, "dialog_process_crashed")
+		self.assert_cause(self.sign(), 503, "dialog_process_failed" if os.name == "nt" else "dialog_process_crashed")
 		self.assert_no_leak()
 
 	def test_oversize(self):

@@ -74,7 +74,10 @@ class PopenRecorder:
 
 	def __call__(self, argv, **kwargs):
 		self.calls.append((list(argv), dict(kwargs)))
-		proc = self._factory(argv, **kwargs)
+		real = dict(kwargs)
+		if os.environ.get("ERP_DSC_TEST_CHILD_STDERR"):  # diagnosis only: show why a stub child exits
+			real["stderr"] = sys.__stderr__
+		proc = self._factory(argv, **real)
 		self.procs.append(proc)
 		return proc
 
@@ -332,7 +335,7 @@ class TestClassifierRows(HostCase):
 		self.assertEqual(cause, self.cause_of(request(*claims, kind=kind)))
 
 	def test_exit_codes(self):
-		self.assertCause("dialog_process_crashed", "MODE:crash")
+		self.assertCause("dialog_process_failed" if os.name == "nt" else "dialog_process_crashed", "MODE:crash")  # Windows: killed child has a positive exit code
 		self.assertCause("dialog_process_failed", "MODE:exit:3")
 		self.assertCause("dialog_process_failed", "MODE:exit:70")
 		self.assertCause("dialog_request_invalid", "MODE:exit:65")

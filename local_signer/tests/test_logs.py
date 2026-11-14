@@ -29,6 +29,14 @@ from pathlib import Path
 from unittest import mock
 
 from erp_dsc_local import cli, logs
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from test_cli import StubServer, StubService
 from test_pin_leak_sweep import DIALOG_SENTINEL, MARK, ORIGIN, LeakSweepCase
 
@@ -66,7 +74,7 @@ class TestPaths(LogDirCase):
 		self.assertEqual(self.dir.resolve() / "logs", logs.log_dir(self.config).resolve())
 
 	def test_default_is_the_state_folder(self):
-		with mock.patch.dict(os.environ, {"HOME": str(self.dir)}):
+		with mock.patch.dict(os.environ, {"HOME": str(self.dir), "USERPROFILE": str(self.dir)}):
 			self.assertEqual(self.dir / ".erp-dsc-local" / "logs" / "erp-dsc-local.log", logs.log_path(None))
 			self.assertEqual(self.dir / ".erp-dsc-local" / "config.json", logs.default_config_path())
 

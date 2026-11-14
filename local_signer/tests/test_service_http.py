@@ -27,6 +27,14 @@ from erp_dsc_local.pin import request_pin
 from erp_dsc_local.service import SignerService
 from erp_dsc_local.trust import TrustStore
 from erp_dsc_local.ui import DialogHost
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from test_signature_meta import server_meta, server_meta_with_icon
 
 

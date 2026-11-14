@@ -30,6 +30,15 @@ from erp_dsc_local.pairing import PairGuard, SiteClaims, consent_dialog
 from erp_dsc_local.pin import request_pin
 from erp_dsc_local.service import SignerService
 from erp_dsc_local.trust import TrustStore
+import os
+import os as _os
+import sys as _sys
+
+# Sibling test modules are imported by bare name; make that work when this module is
+# loaded by its full name from the repository root as well as by discovery.
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+	_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from test_signature_meta import server_meta  # the full meta the ERP sends
 
 
@@ -61,7 +70,7 @@ COMMON_MODES = (
 	("MODE:result:timeout", "dialog_timeout"),
 	("MODE:unavailable:tk_import_failed", "tk_import_failed"),
 	("MODE:unavailable:tk_init_failed", "tk_init_failed"),
-	("MODE:crash", "dialog_process_crashed"),
+	("MODE:crash", "dialog_process_failed" if os.name == "nt" else "dialog_process_crashed"),  # Windows: positive exit code
 	("MODE:exit:3", "dialog_process_failed"),
 	("MODE:valid_then_exit:3", "dialog_process_failed"),  # a valid reply + exit>0 is ignored
 	("MODE:exit:65", "dialog_request_invalid"),

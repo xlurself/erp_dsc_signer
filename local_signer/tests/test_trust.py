@@ -62,6 +62,7 @@ class TestAllowAndPersist(TrustStoreTestCase):
 		# Re-allowing an existing origin is still fine at the cap.
 		store.allow("https://a.example")
 
+	@unittest.skipIf(os.name == "nt", "POSIX mode bits; Windows reports 0o666 for any writable file")
 	def test_file_is_private_and_atomic(self):
 		self.store().allow("https://a.example")
 		mode = stat.S_IMODE(os.stat(self.path).st_mode)
@@ -151,7 +152,10 @@ class TestFailClosed(TrustStoreTestCase):
 		self.path.parent.mkdir(parents=True, exist_ok=True)
 		target = self.path.parent / "real.json"
 		target.write_text(json.dumps({"version": STORE_VERSION, "origins": [{"origin": "https://a.example"}]}), encoding="utf-8")
-		os.symlink(target, self.path)
+		try:
+			os.symlink(target, self.path)
+		except (OSError, NotImplementedError):
+			self.skipTest("symlinks need Administrator or Developer Mode on Windows")
 		self.assertFalse(self.store().is_allowed("https://a.example"))
 
 
