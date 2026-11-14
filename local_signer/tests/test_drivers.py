@@ -61,9 +61,14 @@ class TestKnownPaths(unittest.TestCase):
 
 	def test_the_registry_offers_innaitkey_through_auto(self):
 		config = load_config(self.write_config())
-		registry = ProviderRegistry(config, system="Darwin", path_exists=lambda path: path == INNAIT_MAC)
-		listed = [module.path for module in registry.candidates("auto", None)]
-		self.assertEqual([INNAIT_MAC], listed)
+		# The registry makes paths absolute for the host, so on Windows the POSIX literal comes
+		# back as C:\opt\...; compare in that normalised form on both sides.
+		def same(path):
+			return os.path.normcase(os.path.abspath(path))
+
+		registry = ProviderRegistry(config, system="Darwin", path_exists=lambda path: same(path) == same(INNAIT_MAC))
+		listed = [same(module.path) for module in registry.candidates("auto", None)]
+		self.assertEqual([same(INNAIT_MAC)], listed)
 		self.assertEqual("generic_pkcs11", registry.resolve("auto", None).provider)
 
 	def write_config(self):
